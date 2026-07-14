@@ -1,0 +1,65 @@
+# Local analysis and generated outputs
+/work/
+/outputs/
+/.agents/
+/.codex/
+/.aws-sam/
+/.sam-build/
+/.idp-build/
+/dist/
+/coverage/
+
+# Dependencies and caches
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+*.req
+*.csr
+*.cer
+*.crt
+*.jks
+secrets/
+config/environments/*.json
+!config/environments/*.example.json
+apps/web/public/runtime-config.json
+
+# Mortgage documents and derived sensitive data
+*.pdf
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+ocr-output/
+extraction-output/
+data-points/
+
+# Deployment state
+samconfig.toml
+cdk.out/
+.terraform/
+*.tfstate
+*.tfstate.*
+entra-state*.json
+deployment-outputs*.json
+/.local/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

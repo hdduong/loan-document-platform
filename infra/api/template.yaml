@@ -1,0 +1,1343 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Production regional loan document API, registry, quarantine, malware gate, and processing hooks.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedPattern: '[a-z0-9-]+'
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+  UiHostName:
+    Type: String
+  ApiOriginHostName:
+    Type: String
+  EntraTenantId:
+    Type: String
+    AllowedPattern: '[0-9a-fA-F-]{36}'
+  EntraApiAudience:
+    Type: String
+    AllowedPattern: '[0-9a-fA-F-]{36}'
+  AllowedClientIds:
+    Type: String
+    Description: Comma-delimited Entra client application IDs accepted by the Lambda authorization layer.
+  DeniedClientIds:
+    Type: String
+    Default: ''
+  OriginVerifySecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    MaxLength: 256
+    Description: High-entropy value supplied at deployment time and shared only with the API CloudFront origin.
+  OriginVerifySecretDigest:
+    Type: String
+    AllowedPattern: '[0-9a-f]{64}'
+    Description: Non-secret SHA-256 digest used to detect uncoordinated origin-secret changes.
+  AlertEmail:
+    Type: String
+    AllowedPattern: '[^@]+@[^@]+\.[^@]+'
+  BudgetEmail:
+    Type: String
+    AllowedPattern: '[^@]+@[^@]+\.[^@]+'
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 100
+    MinValue: 1
+  MaximumUploadBytes:
+    Type: Number
+    Default: 104857600
+    MinValue: 1024
+  MaximumPdfPages:
+    Type: Number
+    Default: 200
+    MinValue: 5
+  SourceRetentionDays:
+    Type: Number
+    Default: 2555
+    MinValue: 365
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+  IdpInputBucketName:
+    Type: String
+    Default: ''
+  IdpWorkingBucketName:
+    Type: String
+    Default: ''
+  IdpOutputBucketName:
+    Type: String
+    Default: ''
+  IdpInputKeyArn:
+    Type: String
+    Default: ''
+  IdpStateMachineArn:
+    Type: String
+    Default: ''
+  ScreenConfigVersion:
+    Type: String
+    Default: cd-screen-v1
+  ScreenConfigSha256:
+    Type: String
+    Default: e450ac07f10867f7f7db824b840439e53dbf584a9c82ac2887cba31af8d8a5bf
+    AllowedPattern: '[0-9a-f]{64}'
+  FullConfigVersion:
+    Type: String
+    Default: cd-full-v1
+  FullConfigSha256:
+    Type: String
+    Default: 5eb0bb7d5755701abddc8bea6083bc4d0837423a1a3326d50e1ab0c84d37d57e
+    AllowedPattern: '[0-9a-f]{64}'
+  SelectorRuleVersion:
+    Type: String
+    Default: cd-selection-v1
+  IdpVersion:
+    Type: String
+    Default: 0.5.16
+  IdpCommit:
+    Type: String
+    Default: 1463fb6ff91c9e0169a148b33e6bc85d12bab995
+    AllowedPattern: '[0-9a-f]{40}'
+
+Conditions:
+  HasIdpInputBucket: !Not [!Equals [!Ref IdpInputBucketName, '']]
+  HasIdpWorkingBucket: !Not [!Equals [!Ref IdpWorkingBucketName, '']]
+  HasIdpOutputBucket: !Not [!Equals [!Ref IdpOutputBucketName, '']]
+  HasIdpInputKey: !Not [!Equals [!Ref IdpInputKeyArn, '']]
+  HasIdpStateMachine: !Not [!Equals [!Ref IdpStateMachineArn, '']]
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [x86_64]
+    Tracing: Active
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+    Tags:
+      Application: loan-document-platform
+      Environment: !Ref EnvironmentName
+      ManagedBy: CloudFormation
+
+Resources:
+  DataKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'loan-document-platform ${EnvironmentName} document-data encryption'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogsEncryption
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.${AWS::URLSuffix}'
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:ReEncrypt*
+            Resource: '*'
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DataClassification
+          Value: confidential-loan-document
+
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/loan-document-${EnvironmentName}-data'
+      TargetKeyId: !Ref DataKey
+
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt DataKey.Arn
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - !Sub 'https://${UiHostName}'
+            AllowedHeaders: ['*']
+            AllowedMethods: [GET, HEAD, POST]
+            ExposedHeaders:
+              - ETag
+              - x-amz-checksum-sha256
+              - x-amz-version-id
+            MaxAge: 600
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: RetireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref SourceRetentionDays
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DataClassification
+          Value: confidential-loan-document
+
+  SourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SourceBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt SourceBucket.Arn
+              - !Sub '${SourceBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  RegistryTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DataKey.Arn
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        AttributeName: expiresAtEpoch
+        Enabled: true
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DataClassification
+          Value: confidential-loan-metadata
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub 'Loan document ${EnvironmentName} alerts'
+      KmsMasterKeyId: alias/aws/sns
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  UploadProcessorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PostprocessorDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  GuardDutyMalwareRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'loan-document-${EnvironmentName}-guardduty-malware'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: malware-protection-plan.guardduty.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ScanQuarantinePrefix
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManageGuardDutyEventRule
+                Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*'
+                Condition:
+                  StringLike:
+                    events:ManagedBy: malware-protection-plan.guardduty.amazonaws.com
+              - Sid: MonitorGuardDutyEventRule
+                Effect: Allow
+                Action:
+                  - events:DescribeRule
+                  - events:ListTargetsByRule
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*'
+              - Sid: ConfigureBucketEvents
+                Effect: Allow
+                Action:
+                  - s3:GetBucketNotification
+                  - s3:PutBucketNotification
+                  - s3:ListBucket
+                Resource: !GetAtt SourceBucket.Arn
+              - Sid: ValidateProtectionPlan
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${SourceBucket.Arn}/malware-protection-resource-validation-object'
+              - Sid: ScanAndTagQuarantineObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetObjectTagging
+                  - s3:GetObjectVersionTagging
+                  - s3:PutObjectTagging
+                  - s3:PutObjectVersionTagging
+                Resource: !Sub '${SourceBucket.Arn}/quarantine/*'
+              - Sid: UseDataKeyThroughS3
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt DataKey.Arn
+                Condition:
+                  StringLike:
+                    kms:ViaService: !Sub 's3.${AWS::Region}.${AWS::URLSuffix}'
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  MalwareProtectionPlan:
+    Type: AWS::GuardDuty::MalwareProtectionPlan
+    Properties:
+      Actions:
+        Tagging:
+          Status: ENABLED
+      ProtectedResource:
+        S3Bucket:
+          BucketName: !Ref SourceBucket
+          ObjectPrefixes:
+            - quarantine/
+      Role: !GetAtt GuardDutyMalwareRole.Arn
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  LoanApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'loan-document-${EnvironmentName}-loan-api'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: LoanApiDataAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchGetItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:TransactWriteItems
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt RegistryTable.Arn
+                  - !Sub '${RegistryTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt SourceBucket.Arn
+                  - !Sub '${SourceBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt DataKey.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt UploadProcessorFunction.Arn
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  UploadProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'loan-document-${EnvironmentName}-upload-processor'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: ValidateAndStageUploads
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:TransactWriteItems
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt RegistryTable.Arn
+                  - !Sub '${RegistryTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                  - s3:GetObjectVersion
+                Resource: !Sub '${SourceBucket.Arn}/*'
+              - !If
+                - HasIdpInputBucket
+                - Effect: Allow
+                  Action:
+                    - s3:AbortMultipartUpload
+                    - s3:GetObject
+                    - s3:GetObjectAttributes
+                    - s3:ListBucket
+                    - s3:PutObject
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpInputBucketName}'
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpInputBucketName}/*'
+                - !Ref AWS::NoValue
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource:
+                  - !GetAtt DataKey.Arn
+                  - !If [HasIdpInputKey, !Ref IdpInputKeyArn, !Ref AWS::NoValue]
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt UploadProcessorDlq.Arn
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  IdpPostprocessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'loan-document-${EnvironmentName}-idp-postprocessor'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: SelectAndMaterializeClosingDisclosure
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:TransactWriteItems
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt RegistryTable.Arn
+                  - !Sub '${RegistryTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub '${SourceBucket.Arn}/*'
+              - !If
+                - HasIdpInputBucket
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectAttributes
+                    - s3:GetObjectVersion
+                    - s3:ListBucket
+                    - s3:PutObject
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpInputBucketName}'
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpInputBucketName}/*'
+                - !Ref AWS::NoValue
+              - !If
+                - HasIdpWorkingBucket
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:ListBucket
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpWorkingBucketName}'
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpWorkingBucketName}/*'
+                - !Ref AWS::NoValue
+              - !If
+                - HasIdpOutputBucket
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:ListBucket
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpOutputBucketName}'
+                    - !Sub 'arn:${AWS::Partition}:s3:::${IdpOutputBucketName}/*'
+                - !Ref AWS::NoValue
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource:
+                  - !GetAtt DataKey.Arn
+                  - !If [HasIdpInputKey, !Ref IdpInputKeyArn, !Ref AWS::NoValue]
+              - !If
+                - HasIdpStateMachine
+                - Effect: Allow
+                  Action: states:DescribeExecution
+                  Resource: !Sub
+                    - 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:${StateMachineName}:*'
+                    - StateMachineName: !Select [6, !Split [':', !Ref IdpStateMachineArn]]
+                - !Ref AWS::NoValue
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt PostprocessorDlq.Arn
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  LoanApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'loan-document-${EnvironmentName}-api'
+      CodeUri: ../../services/loan_api
+      Handler: app.lambda_handler
+      Role: !GetAtt LoanApiRole.Arn
+      MemorySize: 1024
+      Timeout: 30
+      ReservedConcurrentExecutions: 40
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RegistryTable
+          SOURCE_BUCKET: !Ref SourceBucket
+          DATA_KEY_ARN: !GetAtt DataKey.Arn
+          ENTRA_TENANT_ID: !Ref EntraTenantId
+          ORIGIN_VERIFY_SECRET: !Ref OriginVerifySecret
+          ALLOWED_CLIENT_IDS: !Ref AllowedClientIds
+          DENIED_CLIENT_IDS: !Ref DeniedClientIds
+          REQUIRE_USER_ROLES: 'true'
+          MAXIMUM_UPLOAD_BYTES: !Ref MaximumUploadBytes
+          UPLOAD_URL_SECONDS: '600'
+          DOWNLOAD_URL_SECONDS: '120'
+          UPLOAD_PROCESSOR_ARN: !GetAtt UploadProcessorFunction.Arn
+
+  UploadProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'loan-document-${EnvironmentName}-upload-processor'
+      CodeUri: ../../services/upload_processor
+      Handler: app.handler
+      Role: !GetAtt UploadProcessorRole.Arn
+      MemorySize: 2048
+      EphemeralStorage:
+        Size: 4096
+      Timeout: 300
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RegistryTable
+          SOURCE_BUCKET: !Ref SourceBucket
+          DATA_KEY_ARN: !GetAtt DataKey.Arn
+          IDP_INPUT_BUCKET: !Ref IdpInputBucketName
+          IDP_INPUT_KEY_ARN: !If [HasIdpInputKey, !Ref IdpInputKeyArn, !GetAtt DataKey.Arn]
+          SCREEN_CONFIG_VERSION: !Ref ScreenConfigVersion
+          SCREEN_CONFIG_SHA256: !Ref ScreenConfigSha256
+          SELECTOR_RULE_VERSION: !Ref SelectorRuleVersion
+          MAXIMUM_UPLOAD_BYTES: !Ref MaximumUploadBytes
+          MAXIMUM_PDF_PAGES: !Ref MaximumPdfPages
+
+  IdpPostprocessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'loan-document-${EnvironmentName}-idp-postprocessor'
+      CodeUri: ../../services/idp_postprocessor
+      Handler: app.handler
+      Role: !GetAtt IdpPostprocessorRole.Arn
+      MemorySize: 2048
+      EphemeralStorage:
+        Size: 4096
+      Timeout: 300
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RegistryTable
+          SOURCE_BUCKET: !Ref SourceBucket
+          DATA_KEY_ARN: !GetAtt DataKey.Arn
+          IDP_INPUT_BUCKET: !Ref IdpInputBucketName
+          IDP_INPUT_KEY_ARN: !If [HasIdpInputKey, !Ref IdpInputKeyArn, !GetAtt DataKey.Arn]
+          IDP_WORKING_BUCKET: !Ref IdpWorkingBucketName
+          IDP_OUTPUT_BUCKET: !Ref IdpOutputBucketName
+          SCREEN_CONFIG_VERSION: !Ref ScreenConfigVersion
+          SCREEN_CONFIG_SHA256: !Ref ScreenConfigSha256
+          FULL_CONFIG_VERSION: !Ref FullConfigVersion
+          FULL_CONFIG_SHA256: !Ref FullConfigSha256
+          SELECTOR_RULE_VERSION: !Ref SelectorRuleVersion
+          IDP_VERSION: !Ref IdpVersion
+          IDP_COMMIT: !Ref IdpCommit
+          MAXIMUM_PDF_PAGES: !Ref MaximumPdfPages
+          IDP_STATE_MACHINE_ARNS: !Ref IdpStateMachineArn
+          ACTIVE_EXECUTION_INDEX_NAME: GSI2
+          WATCHDOG_MAX_ITEMS: '50'
+          WATCHDOG_MIN_AGE_SECONDS: '300'
+
+  UploadProcessorAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref UploadProcessorFunction
+      Qualifier: '$LATEST'
+      MaximumEventAgeInSeconds: 3600
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt UploadProcessorDlq.Arn
+
+  PostprocessorAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref IdpPostprocessorFunction
+      Qualifier: '$LATEST'
+      MaximumEventAgeInSeconds: 21600
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt PostprocessorDlq.Arn
+
+  GuardDutyScanResultRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Route exact GuardDuty S3 malware scan results to the upload processor.
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - GuardDuty Malware Protection Object Scan Result
+        detail:
+          s3ObjectDetails:
+            bucketName:
+              - !Ref SourceBucket
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UploadProcessorFunction.Arn
+          Id: UploadProcessor
+          DeadLetterConfig:
+            Arn: !GetAtt UploadProcessorDlq.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 10
+
+  GuardDutyRuleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UploadProcessorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GuardDutyScanResultRule.Arn
+
+  IdpFailureRule:
+    Type: AWS::Events::Rule
+    Condition: HasIdpStateMachine
+    Properties:
+      Description: Route IDP execution lifecycle events to the postprocessor for active tracking and reconciliation.
+      EventPattern:
+        source:
+          - aws.states
+        detail-type:
+          - Step Functions Execution Status Change
+        detail:
+          stateMachineArn:
+            - !Ref IdpStateMachineArn
+          status:
+            - RUNNING
+            - SUCCEEDED
+            - FAILED
+            - TIMED_OUT
+            - ABORTED
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IdpPostprocessorFunction.Arn
+          Id: IdpPostprocessor
+          DeadLetterConfig:
+            Arn: !GetAtt PostprocessorDlq.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 21600
+            MaximumRetryAttempts: 10
+
+  IdpFailureRuleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasIdpStateMachine
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IdpPostprocessorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IdpFailureRule.Arn
+
+  IdpExecutionWatchdogRule:
+    Type: AWS::Events::Rule
+    Condition: HasIdpStateMachine
+    Properties:
+      Description: Reconcile bounded stale IDP executions when a terminal service event was missed.
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IdpPostprocessorFunction.Arn
+          Id: IdpExecutionWatchdog
+          Input: '{"source":"loan-document-platform.watchdog","detail-type":"IDP Execution Watchdog","detail":{}}'
+          DeadLetterConfig:
+            Arn: !GetAtt PostprocessorDlq.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 900
+            MaximumRetryAttempts: 2
+
+  IdpExecutionWatchdogInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasIdpStateMachine
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IdpPostprocessorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IdpExecutionWatchdogRule.Arn
+
+  UploadProcessorDlqPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref UploadProcessorDlq
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt UploadProcessorDlq.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt GuardDutyScanResultRule.Arn
+
+  PostprocessorDlqPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Condition: HasIdpStateMachine
+    Properties:
+      Queues:
+        - !Ref PostprocessorDlq
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt PostprocessorDlq.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt IdpFailureRule.Arn
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt PostprocessorDlq.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt IdpExecutionWatchdogRule.Arn
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/loan-document-${EnvironmentName}'
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt DataKey.Arn
+
+  LoanApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${LoanApiFunction}'
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt DataKey.Arn
+
+  UploadProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${UploadProcessorFunction}'
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt DataKey.Arn
+
+  IdpPostprocessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${IdpPostprocessorFunction}'
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt DataKey.Arn
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'loan-document-${EnvironmentName}'
+      ProtocolType: HTTP
+      DisableExecuteApiEndpoint: true
+      CorsConfiguration:
+        AllowCredentials: false
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+          - Idempotency-Key
+          - X-Correlation-Id
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        AllowOrigins:
+          - !Sub 'https://${UiHostName}'
+        ExposeHeaders:
+          - Content-Disposition
+          - X-Correlation-Id
+        MaxAge: 600
+      Tags:
+        Application: loan-document-platform
+        Environment: !Ref EnvironmentName
+
+  EntraJwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      IdentitySource:
+        - '$request.header.Authorization'
+      JwtConfiguration:
+        Audience:
+          - !Ref EntraApiAudience
+        Issuer: !Sub 'https://login.microsoftonline.com/${EntraTenantId}/v2.0'
+      Name: entra-jwt
+
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt LoanApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 29000
+
+  AuthenticatedDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: '$default'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref EntraJwtAuthorizer
+      Target: !Join ['', ['integrations/', !Ref ApiIntegration]]
+
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /health'
+      AuthorizationType: NONE
+      Target: !Join ['', ['integrations/', !Ref ApiIntegration]]
+
+  CorsPreflightRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'OPTIONS /{proxy+}'
+      AuthorizationType: NONE
+      Target: !Join ['', ['integrations/', !Ref ApiIntegration]]
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage"}
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+      Tags:
+        Application: loan-document-platform
+        Environment: !Ref EnvironmentName
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LoanApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+
+  ApiOriginCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref ApiOriginHostName
+      DomainValidationOptions:
+        - DomainName: !Ref ApiOriginHostName
+          HostedZoneId: !Ref HostedZoneId
+      ValidationMethod: DNS
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  ApiOriginDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref ApiOriginHostName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref ApiOriginCertificate
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+      Tags:
+        Application: loan-document-platform
+        Environment: !Ref EnvironmentName
+
+  ApiOriginMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiOriginDomain
+      Stage: !Ref ApiStage
+
+  ApiOriginIpv4Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref ApiOriginHostName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiOriginDomain.RegionalDomainName
+        HostedZoneId: !GetAtt ApiOriginDomain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
+
+  ApiOriginIpv6Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref ApiOriginHostName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt ApiOriginDomain.RegionalDomainName
+        HostedZoneId: !GetAtt ApiOriginDomain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'loan-document-${EnvironmentName}-backup'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Sub 'loan-document-${EnvironmentName}'
+      EncryptionKeyArn: !GetAtt DataKey.Arn
+      BackupVaultTags:
+        Application: loan-document-platform
+        Environment: !Ref EnvironmentName
+
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub 'loan-document-${EnvironmentName}'
+        BackupPlanRule:
+          - RuleName: daily-35-days
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: cron(0 9 ? * * *)
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 360
+            Lifecycle:
+              DeleteAfterDays: 35
+          - RuleName: monthly-seven-years
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: cron(0 10 1 * ? *)
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 720
+            Lifecycle:
+              DeleteAfterDays: !Ref SourceRetentionDays
+      BackupPlanTags:
+        Application: loan-document-platform
+        Environment: !Ref EnvironmentName
+
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: registry-table
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !GetAtt RegistryTable.Arn
+
+  MonthlyCostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+        BudgetName: !Sub 'loan-document-${EnvironmentName}-monthly'
+        BudgetType: COST
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: FORECASTED
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref BudgetEmail
+              SubscriptionType: EMAIL
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref BudgetEmail
+              SubscriptionType: EMAIL
+
+  LoanApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Loan API Lambda errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LoanApiFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  ProcessorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Upload processor or IDP postprocessor errors.
+      Metrics:
+        - Id: uploadErrors
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref UploadProcessorFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: postErrors
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref IdpPostprocessorFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: totalErrors
+          Expression: uploadErrors + postErrors
+          Label: Processor errors
+          ReturnData: true
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  ApiServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: HTTP API 5xx responses.
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref HttpApi
+        - Name: Stage
+          Value: '$default'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  RegistryThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: DynamoDB throttled requests.
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value: !Ref RegistryTable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  UploadDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Upload processor dead-letter queue contains messages.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt UploadProcessorDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  PostprocessorDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: IDP postprocessor dead-letter queue contains messages.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt PostprocessorDlq.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  ApiCertificateExpiryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Regional API origin certificate expires within 30 days.
+      Namespace: AWS/CertificateManager
+      MetricName: DaysToExpiry
+      Dimensions:
+        - Name: CertificateArn
+          Value: !Ref ApiOriginCertificate
+      Statistic: Minimum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: 30
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+Outputs:
+  ApiId:
+    Value: !Ref HttpApi
+  ApiOriginUrl:
+    Value: !Sub 'https://${ApiOriginHostName}'
+  ApiOriginCertificateArn:
+    Value: !Ref ApiOriginCertificate
+  SourceBucketName:
+    Value: !Ref SourceBucket
+  DataKeyArn:
+    Value: !GetAtt DataKey.Arn
+  RegistryTableName:
+    Value: !Ref RegistryTable
+  RegistryTableArn:
+    Value: !GetAtt RegistryTable.Arn
+  UploadProcessorFunctionArn:
+    Value: !GetAtt UploadProcessorFunction.Arn
+  IdpPostprocessorFunctionArn:
+    Value: !GetAtt IdpPostprocessorFunction.Arn
+  AlertsTopicArn:
+    Value: !Ref AlertsTopic
+  MalwareProtectionPlanArn:
+    Value: !GetAtt MalwareProtectionPlan.Arn
+  OriginVerifySecretDigest:
+    Value: !Ref OriginVerifySecretDigest
+    Description: Non-secret digest only; compare with the edge stack output before traffic cutover.

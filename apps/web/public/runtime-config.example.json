@@ -1,0 +1,11 @@
+{
+  "environment": "production",
+  "apiBaseUrl": "https://api.loans.example.com",
+  "entraTenantId": "00000000-0000-4000-8000-000000000000",
+  "entraSpaClientId": "00000000-0000-4000-8000-000000000000",
+  "entraApiScopeBase": "api://00000000-0000-4000-8000-000000000000",
+  "redirectUri": "https://loans.example.com/auth/callback",
+  "postLogoutRedirectUri": "https://loans.example.com/",
+  "buildSha": "0000000",
+  "maximumUploadBytes": 104857600
+}

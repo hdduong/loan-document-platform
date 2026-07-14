@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/aws-solutions-library-samples/accelerated-intelligent-document-processing-on-aws.git",
+  "version": "0.5.16",
+  "tag": "v0.5.16",
+  "commit": "1463fb6ff91c9e0169a148b33e6bc85d12bab995",
+  "deploymentMode": "headless",
+  "notes": "Pin the source commit and publish immutable production templates; do not deploy production from a moving branch."
+}

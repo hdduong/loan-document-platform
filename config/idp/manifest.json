@@ -1,0 +1,15 @@
+{
+  "screen": {
+    "name": "cd-screen-v1",
+    "file": "cd-screen-v1.json",
+    "sourceSha256": "e450ac07f10867f7f7db824b840439e53dbf584a9c82ac2887cba31af8d8a5bf",
+    "purpose": "Text-only OCR and lightweight evidence extraction across the complete package"
+  },
+  "full": {
+    "name": "cd-full-v1",
+    "file": "cd-full-v1.json",
+    "sourceSha256": "5eb0bb7d5755701abddc8bea6083bc4d0837423a1a3326d50e1ab0c84d37d57e",
+    "purpose": "Existing high-accuracy Forms+Tables and Claude Opus extraction on selected pages"
+  },
+  "selectorRuleVersion": "cd-selection-v1"
+}

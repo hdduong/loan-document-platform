@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loan-document-platform.example/schemas/runtime-config.schema.json",
+  "title": "Loan Document UI runtime configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "environment",
+    "apiBaseUrl",
+    "entraTenantId",
+    "entraSpaClientId",
+    "entraApiScopeBase",
+    "redirectUri",
+    "postLogoutRedirectUri",
+    "buildSha",
+    "maximumUploadBytes"
+  ],
+  "properties": {
+    "environment": {
+      "type": "string",
+      "enum": ["development", "staging", "production"]
+    },
+    "apiBaseUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "entraTenantId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "entraSpaClientId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "entraApiScopeBase": {
+      "type": "string",
+      "pattern": "^api://[0-9a-fA-F-]{36}$"
+    },
+    "redirectUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "postLogoutRedirectUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "buildSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "maximumUploadBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 104857600
+    }
+  }
+}

@@ -1,0 +1,845 @@
+openapi: 3.1.0
+info:
+  title: Loan Document Platform API
+  version: 1.0.0
+  description: |
+    Entra-protected API for loan lifecycle, direct document upload, IDP status,
+    immutable document/loan archives, extracted data, and artifact download grants.
+    Archive is not deletion. All mutation routes require Idempotency-Key.
+servers:
+  - url: https://api.loans.example.com
+    description: Placeholder production URL; runtime configuration supplies the real domain.
+tags:
+  - name: Health
+  - name: Loans
+  - name: Documents
+  - name: Archives
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Service is reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+
+  /v1/loans:
+    post:
+      tags: [Loans]
+      operationId: createLoan
+      x-required-permission: Loan.Create
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLoanRequest'
+      responses:
+        '201':
+          description: A new active loan instance was created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoanInstance' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+    get:
+      tags: [Loans]
+      operationId: getLoan
+      x-required-permission: Loan.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Current loan instance and archive history.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoanView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archive:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+    post:
+      tags: [Archives]
+      operationId: archiveLoan
+      x-required-permission: Loan.Archive
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '201':
+          description: The loan was archived; an idempotent replay returns this exact response.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoanArchiveSummary' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+    get:
+      tags: [Archives]
+      operationId: getLoanArchive
+      x-required-permission: Loan.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Read-only loan archive manifest view.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoanArchiveView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Archives, Documents]
+      operationId: getArchivedLoanDocument
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Document snapshot captured by an immutable loan archive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ArchivedLoanDocumentView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}/archives/{documentArchiveSequence}:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives, Documents]
+      operationId: getArchivedLoanDocumentArchive
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Prior document-version archive belonging to an archived loan instance.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentArchiveView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}/archives/{documentArchiveSequence}/data-points:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives, Documents]
+      operationId: getArchivedLoanDocumentArchiveDataPoints
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Data points pinned by a prior document-version archive in an archived loan.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}/archives/{documentArchiveSequence}/data-points/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives, Documents]
+      operationId: createArchivedLoanDocumentArchiveDataPointsDownloadGrant
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Short-lived grant for data points pinned by a prior document-version archive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}/archives/{documentArchiveSequence}/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives, Documents]
+      operationId: createArchivedLoanDocumentArchiveDownloadGrant
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: artifact
+          in: query
+          required: true
+          schema: { type: string, enum: [source, selected] }
+      responses:
+        '200':
+          description: Short-lived grant for an exact PDF pinned by a prior document-version archive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}/data-points:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Archives, Documents]
+      operationId: getArchivedLoanDocumentDataPoints
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Extracted data-point JSON pinned by the loan archive.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}/data-points/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Archives, Documents]
+      operationId: createArchivedLoanDocumentDataPointsDownloadGrant
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Short-lived grant for data points pinned by the loan archive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/LoanArchiveSequence'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Archives, Documents]
+      operationId: createArchivedLoanDocumentDownloadGrant
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: artifact
+          in: query
+          required: true
+          schema: { type: string, enum: [source, selected] }
+      responses:
+        '200':
+          description: Short-lived grant for an exact PDF version pinned by the loan archive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+    post:
+      tags: [Documents]
+      operationId: createDocument
+      x-required-permission: Document.Upload
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUploadRequest' }
+      responses:
+        '201':
+          description: Stable logical document and first physical upload were initialized.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/uploads:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Documents]
+      operationId: createReplacementUpload
+      x-required-permission: Document.Upload
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUploadRequest' }
+      responses:
+        '201':
+          description: Replacement upload initialized under the stable document ID.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/uploads/{uploadId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/UploadId'
+    post:
+      tags: [Documents]
+      operationId: completeUpload
+      summary: Confirm that the direct S3 upload finished; this endpoint never carries PDF bytes.
+      x-required-permission: Document.Upload
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '202':
+          description: Exact S3 version was captured and validation/malware reconciliation is pending.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingAccepted' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Documents]
+      operationId: getDocument
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Current logical document and physical upload/processing state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/archive:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Archives]
+      operationId: archiveDocument
+      x-required-permission: Document.Archive
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '201':
+          description: The current version was archived; an idempotent replay returns this exact response.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentArchiveSummary' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/archives/{documentArchiveSequence}:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives]
+      operationId: getDocumentArchive
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Read-only document archive metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentArchiveView' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/archives/{documentArchiveSequence}/data-points:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives, Documents]
+      operationId: getDocumentArchiveDataPoints
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Data points pinned by a prior document-version archive.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/archives/{documentArchiveSequence}/data-points/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives, Documents]
+      operationId: createDocumentArchiveDataPointsDownloadGrant
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Short-lived grant for data points pinned by a prior document-version archive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/archives/{documentArchiveSequence}/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/DocumentArchiveSequence'
+    get:
+      tags: [Archives, Documents]
+      operationId: createDocumentArchiveDownloadGrant
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: artifact
+          in: query
+          required: true
+          schema: { type: string, enum: [source, selected] }
+      responses:
+        '200':
+          description: Short-lived grant for an exact PDF pinned by a prior document-version archive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/data-points:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Documents]
+      operationId: getDataPoints
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Extracted data-point JSON. Shape depends on the pinned IDP schema version.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/data-points/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Documents]
+      operationId: createDataPointsDownloadGrant
+      x-required-permission: DataPoints.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Short-lived grant for the pinned data-point object version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /v1/loans/{loanId}/documents/{documentId}/download:
+    parameters:
+      - $ref: '#/components/parameters/LoanId'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Documents]
+      operationId: createDocumentDownloadGrant
+      x-required-permission: Document.Read
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: artifact
+          in: query
+          required: true
+          schema: { type: string, enum: [source, selected] }
+      responses:
+        '200':
+          description: Short-lived grant for an exact S3 object version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadGrant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
+components:
+  securitySchemes:
+    entraOAuth:
+      type: oauth2
+      description: |
+        Delegated tokens must carry both the operation's `scp` and assigned app role.
+        App-only tokens use the `.default` client-credentials request and must carry
+        the assigned application role plus `idtyp=app`.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/authorize
+          tokenUrl: https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/token
+          scopes:
+            Loan.Create: Create a current loan instance.
+            Loan.Read: Read active and archived loans.
+            Loan.Archive: Archive an active loan and all documents.
+            Document.Upload: Initialize and complete document uploads.
+            Document.Read: Read document status and PDF artifacts.
+            Document.Archive: Archive a document version.
+            DataPoints.Read: Read and download extracted data points.
+        clientCredentials:
+          tokenUrl: https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/token
+          scopes:
+            'api://{api-client-id}/.default': Request the application roles assigned to this API client.
+  parameters:
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+    LoanId:
+      name: loanId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: '^[A-Za-z0-9][A-Za-z0-9_-]*$'
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^doc_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^upl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+    LoanArchiveSequence:
+      name: loanArchiveSequence
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    DocumentArchiveSequence:
+      name: documentArchiveSequence
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+  responses:
+    Problem:
+      description: RFC 9457 problem detail.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: State or idempotency conflict.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource does not exist or is not accessible to the caller.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    CreateLoanRequest:
+      type: object
+      additionalProperties: false
+      required: [loanId]
+      properties:
+        loanId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]*$'
+    LoanInstance:
+      type: object
+      additionalProperties: false
+      required: [loanId, loanInstanceId, status, createdAt]
+      properties:
+        loanId: { type: string }
+        loanInstanceId: { type: string, pattern: '^lin_[0-9a-f-]{36}$' }
+        status: { type: string, enum: [ACTIVE, ARCHIVING, ARCHIVED] }
+        createdAt: { type: string, format: date-time }
+    LoanView:
+      type: object
+      required: [loanId, current, archives]
+      properties:
+        loanId: { type: string }
+        current:
+          oneOf:
+            - $ref: '#/components/schemas/CurrentLoanView'
+            - type: 'null'
+        archives:
+          type: array
+          items: { $ref: '#/components/schemas/LoanArchiveSummary' }
+    CurrentLoanView:
+      type: object
+      required: [loanInstanceId, status, createdAt, documents]
+      properties:
+        loanInstanceId: { type: string }
+        status: { type: string, enum: [ACTIVE, ARCHIVING] }
+        createdAt: { type: string, format: date-time }
+        documents:
+          type: array
+          items: { $ref: '#/components/schemas/DocumentSummary' }
+    LoanArchiveSummary:
+      type: object
+      required: [loanId, loanInstanceId, archiveSequence, displayLoanId, status, archivedAt, documentCount]
+      properties:
+        loanId: { type: string }
+        loanInstanceId: { type: string }
+        archiveSequence: { type: integer, minimum: 1 }
+        displayLoanId: { type: string }
+        status: { type: string, const: ARCHIVED }
+        archivedAt: { type: string, format: date-time }
+        documentCount: { type: integer, minimum: 0 }
+        links: { $ref: '#/components/schemas/Links' }
+    LoanArchiveView:
+      allOf:
+        - $ref: '#/components/schemas/LoanArchiveSummary'
+        - type: object
+          required: [documents]
+          properties:
+            documents:
+              type: array
+              items: { $ref: '#/components/schemas/ArchivedLoanDocumentView' }
+    ArchivedLoanDocumentView:
+      type: object
+      required: [loanId, loanInstanceId, loanArchiveSequence, documentId, status, currentUploadId, artifacts, links]
+      properties:
+        loanId: { type: string }
+        loanInstanceId: { type: string, pattern: '^lin_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+        loanArchiveSequence: { type: integer, minimum: 1 }
+        documentId: { type: string, pattern: '^doc_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+        status: { $ref: '#/components/schemas/ProcessingStatus' }
+        currentUploadId: { type: [string, 'null'] }
+        fileName: { type: [string, 'null'] }
+        createdAt: { type: [string, 'null'], format: date-time }
+        updatedAt: { type: [string, 'null'], format: date-time }
+        processingExecutionId: { type: [string, 'null'] }
+        failureCode: { type: [string, 'null'] }
+        artifacts:
+          type: array
+          items: { type: string, enum: [source, selected, data-points] }
+        archives:
+          type: array
+          items: { $ref: '#/components/schemas/DocumentArchiveSummary' }
+        links: { $ref: '#/components/schemas/Links' }
+    CreateUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [fileName, contentType, sizeBytes, checksumSha256]
+      properties:
+        fileName: { type: string, minLength: 1, maxLength: 255 }
+        contentType: { type: string, const: application/pdf }
+        sizeBytes: { type: integer, minimum: 1 }
+        checksumSha256:
+          type: string
+          description: Base64-encoded 32-byte SHA-256 digest required by S3 checksum headers.
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+    UploadSession:
+      type: object
+      required: [loanId, documentId, uploadId, status, expiresAt, upload]
+      properties:
+        loanId: { type: string }
+        documentId: { type: string }
+        uploadId: { type: string }
+        status: { type: string, const: AWAITING_UPLOAD }
+        expiresAt: { type: string, format: date-time }
+        upload:
+          type: object
+          required: [method, url, fields]
+          properties:
+            method: { type: string, const: POST }
+            url: { type: string, format: uri }
+            fields:
+              type: object
+              additionalProperties: { type: string }
+    ProcessingAccepted:
+      type: object
+      required: [loanId, documentId, uploadId, processingExecutionId, status]
+      properties:
+        loanId: { type: string }
+        documentId: { type: string }
+        uploadId: { type: string }
+        processingExecutionId: { type: string, pattern: '^run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+        status: { $ref: '#/components/schemas/ProcessingStatus' }
+    ProcessingStatus:
+      type: string
+      enum:
+        - AWAITING_UPLOAD
+        - VALIDATING
+        - QUEUED
+        - SCREENING
+        - SELECTED
+        - EXTRACTING
+        - SUCCEEDED
+        - HOLD
+        - REJECTED
+        - FAILED
+        - ARCHIVING
+        - ARCHIVED
+    DocumentSummary:
+      type: object
+      required: [documentId, status, createdAt, updatedAt]
+      properties:
+        documentId: { type: string }
+        status: { $ref: '#/components/schemas/ProcessingStatus' }
+        currentUploadId: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    DocumentView:
+      allOf:
+        - $ref: '#/components/schemas/DocumentSummary'
+        - type: object
+          required: [loanId, loanInstanceId, archives, artifacts]
+          properties:
+            loanId: { type: string }
+            loanInstanceId: { type: string }
+            processingExecutionId: { type: [string, 'null'] }
+            failureCode: { type: [string, 'null'] }
+            archives:
+              type: array
+              items: { $ref: '#/components/schemas/DocumentArchiveSummary' }
+            artifacts:
+              type: array
+              items: { type: string, enum: [source, selected, data-points] }
+            links: { $ref: '#/components/schemas/Links' }
+    DocumentArchiveSummary:
+      type: object
+      required: [documentId, uploadId, archiveSequence, displayDocumentId, status, archivedAt]
+      properties:
+        documentId: { type: string }
+        uploadId: { type: string }
+        archiveSequence: { type: integer, minimum: 1 }
+        displayDocumentId: { type: string }
+        status: { type: string, const: ARCHIVED }
+        archivedAt: { type: string, format: date-time }
+        links: { $ref: '#/components/schemas/Links' }
+    DocumentArchiveView:
+      allOf:
+        - $ref: '#/components/schemas/DocumentArchiveSummary'
+        - type: object
+          properties:
+            artifacts:
+              type: array
+              items: { type: string, enum: [source, selected, data-points] }
+    DownloadGrant:
+      type: object
+      additionalProperties: false
+      required: [downloadUrl, fileName, contentType, expiresAt]
+      properties:
+        downloadUrl: { type: string, format: uri }
+        fileName: { type: string }
+        contentType: { type: string }
+        expiresAt: { type: string, format: date-time }
+    Links:
+      type: object
+      additionalProperties: { type: string, format: uri-reference }
+    Problem:
+      type: object
+      required: [type, title, status, code, correlationId]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        code: { type: string }
+        correlationId: { type: string, format: uuid }
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+security:
+  - entraOAuth: []
