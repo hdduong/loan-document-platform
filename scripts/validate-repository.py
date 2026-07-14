@@ -28,12 +28,12 @@ def load_json(path: Path) -> Any:
         return json.load(handle)
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def normalized_text_sha256(path: Path) -> str:
+    """Hash reviewed text with stable newlines across Git checkout platforms."""
+
+    content = path.read_text(encoding="utf-8")
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def require(condition: bool, message: str) -> None:
@@ -89,7 +89,7 @@ def main() -> None:
         path = IDP_DIR / entry["file"]
         require(path.is_file(), f"Missing {name} configuration: {path}")
         require(
-            sha256(path) == entry["sourceSha256"],
+            normalized_text_sha256(path) == entry["sourceSha256"],
             f"{path.name} differs from its reviewed manifest digest; regenerate/review the manifest intentionally.",
         )
 

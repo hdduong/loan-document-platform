@@ -2,7 +2,7 @@
   "screen": {
     "name": "cd-screen-v1",
     "file": "cd-screen-v1.json",
-    "sourceSha256": "e450ac07f10867f7f7db824b840439e53dbf584a9c82ac2887cba31af8d8a5bf",
+    "sourceSha256": "7af2c990538bf15ab1bdf17ef1adf45398b556443a81a41f950086e1513e96dc",
     "purpose": "Text-only OCR and lightweight evidence extraction across the complete package"
   },
   "full": {

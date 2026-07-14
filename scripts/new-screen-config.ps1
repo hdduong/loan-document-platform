@@ -7,6 +7,20 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Get-NormalizedTextSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path).Path)
+    $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($normalized)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
 $fullConfigPath = (Resolve-Path -LiteralPath $FullConfigPath).Path
 $config = Get-Content -Raw -LiteralPath $fullConfigPath | ConvertFrom-Json -Depth 100
 
@@ -165,8 +179,8 @@ if (-not (Test-Path -LiteralPath $outputDirectory)) {
 $json = $config | ConvertTo-Json -Depth 100
 [System.IO.File]::WriteAllText($OutputPath, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 
-$screenHash = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$fullHash = (Get-FileHash -LiteralPath $fullConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$screenHash = Get-NormalizedTextSha256 -Path $OutputPath
+$fullHash = Get-NormalizedTextSha256 -Path $fullConfigPath
 Write-Host "Wrote $OutputPath"
 Write-Host "cd-screen-v1 sha256: $screenHash"
 Write-Host "cd-full-v1   sha256: $fullHash"
