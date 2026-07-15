@@ -59,6 +59,15 @@ def test_markdown_links_must_resolve_inside_repository(tmp_path: Path, monkeypat
     with pytest.raises(ValueError, match="Absolute Markdown link"):
         validator.validate_markdown_links(markdown)
 
+    encoded_path = docs / "%2e%2e" / "%2e%2e"
+    encoded_path.mkdir(parents=True)
+    (encoded_path / "outside.md").write_text("# Encoded path\n", encoding="utf-8")
+    markdown.write_text(
+        "[encoded escape](%2e%2e/%2e%2e/outside.md)\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="escapes the repository"):
+        validator.validate_markdown_links(markdown)
+
 
 def test_active_feature_path_can_change_within_specs(tmp_path: Path, monkeypatch) -> None:
     validator = load_validator()

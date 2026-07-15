@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+from urllib.parse import unquote
 
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
@@ -139,7 +140,7 @@ def validate_markdown_links(path: Path) -> None:
         target = raw_target.strip().strip("<>")
         if not target or target.startswith(("#", "http://", "https://", "mailto:")):
             continue
-        relative_target = target.split("#", 1)[0].replace("%20", " ")
+        relative_target = unquote(target.split("#", 1)[0])
         resolved_target = resolve_repository_path(path.parent, relative_target, "Markdown link")
         require(
             resolved_target.exists(),
