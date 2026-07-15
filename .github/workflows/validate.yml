@@ -33,6 +33,10 @@ jobs:
       - name: Validate pinned configurations
         run: python scripts/validate-repository.py
 
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: ./scripts/test-powershell-syntax.ps1
+
       - name: Compile Python
         run: python -m compileall -q services scripts
 
