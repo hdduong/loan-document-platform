@@ -1,4 +1,4 @@
-"""Focused, AWS-free regression tests for the loan API Lambda."""
+"""Focused, AWS-free regression tests for the provider-neutral loan domain service."""
 
 from __future__ import annotations
 

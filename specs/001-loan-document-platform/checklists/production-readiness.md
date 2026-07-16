@@ -1,5 +1,7 @@
 # Production Readiness Checklist: Loan Document Platform
 
+> **Historical baseline — do not execute.** This file records the superseded AWS-hosted product API. Use the current [Azure API control-plane specification](../../002-azure-api-control-plane/spec.md) and its companion files for implementation.
+
 - **Purpose**: Separate repository readiness from real AWS/Entra/domain operational acceptance.
 - **Created**: 2026-07-14
 - **Feature**: [spec.md](../spec.md)

@@ -1,5 +1,7 @@
 # Research and Decisions: Loan Document Platform
 
+> **Historical baseline — do not execute.** This file records the superseded AWS-hosted product API. Use the current [Azure API control-plane specification](../002-azure-api-control-plane/spec.md) and its companion files for implementation.
+
 All material architecture choices are resolved for the baseline. Live account/domain values remain deployment inputs, not design ambiguities.
 
 ## Source hosting and AWS delivery identity

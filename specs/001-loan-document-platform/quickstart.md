@@ -1,5 +1,7 @@
 # Quickstart: Loan Document Platform
 
+> **Historical baseline — do not execute.** This file records the superseded AWS-hosted product API. Use the current [Azure API control-plane specification](../002-azure-api-control-plane/spec.md) and its companion files for implementation.
+
 This is a synthetic-data developer and release path. It does not deploy until real account/domain inputs are supplied through ignored configuration.
 
 ## Prerequisites

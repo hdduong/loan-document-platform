@@ -1,5 +1,7 @@
 # Data Model: Loan Document Platform
 
+> **Historical baseline — do not execute.** This file records the superseded AWS-hosted product API. Use the current [Azure API control-plane specification](../002-azure-api-control-plane/spec.md) and its companion files for implementation.
+
 ## Identity Rules
 
 | Identifier | Issuer | Scope | Mutability |

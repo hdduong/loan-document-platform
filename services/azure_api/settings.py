@@ -65,14 +65,23 @@ def _origins(environ: Mapping[str, str], environment: str) -> tuple[str, ...]:
     origins = _csv(environ, "ALLOWED_ORIGINS")
     if not origins:
         raise ConfigurationError("ALLOWED_ORIGINS must contain at least one origin")
+    normalized_origins: list[str] = []
     for origin in origins:
-        parsed = urlparse(origin)
+        try:
+            parsed = urlparse(origin)
+        except ValueError as exc:
+            raise ConfigurationError("ALLOWED_ORIGINS entries contain an invalid hostname") from exc
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ConfigurationError("ALLOWED_ORIGINS entries contain an invalid port") from exc
         localhost = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
         if (
             parsed.path not in {"", "/"}
             or parsed.query
             or parsed.fragment
             or not parsed.netloc
+            or not parsed.hostname
             or parsed.username
             or parsed.password
             or "*" in parsed.netloc
@@ -80,7 +89,12 @@ def _origins(environ: Mapping[str, str], environment: str) -> tuple[str, ...]:
             raise ConfigurationError("ALLOWED_ORIGINS entries must be origins without paths")
         if parsed.scheme != "https" and not (environment != "prod" and parsed.scheme == "http" and localhost):
             raise ConfigurationError("ALLOWED_ORIGINS entries must use HTTPS")
-    return tuple(f"{urlparse(origin).scheme}://{urlparse(origin).netloc}" for origin in origins)
+        hostname = parsed.hostname or ""
+        rendered_hostname = f"[{hostname}]" if ":" in hostname else hostname
+        default_port = 443 if parsed.scheme == "https" else 80
+        port_suffix = f":{port}" if port is not None and port != default_port else ""
+        normalized_origins.append(f"{parsed.scheme}://{rendered_hostname}{port_suffix}")
+    return tuple(dict.fromkeys(normalized_origins))
 
 
 def _api_hostname(environ: Mapping[str, str]) -> str:

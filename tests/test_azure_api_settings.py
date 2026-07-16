@@ -77,6 +77,29 @@ def test_non_production_allows_local_http_and_explicit_overrides() -> None:
     assert settings.jwks_timeout_seconds == 5
 
 
+def test_origins_normalize_default_ports_and_preserve_non_default_ports() -> None:
+    values = environment()
+    values.update(
+        {
+            "ENVIRONMENT_NAME": "dev",
+            "ALLOWED_ORIGINS": (
+                "https://LOANS.example.com:443,https://loans.example.com,"
+                "http://localhost:80,"
+                "http://localhost:5173,https://api.example.com:8443"
+            ),
+        }
+    )
+
+    settings = Settings.from_env(values)
+
+    assert settings.allowed_origins == (
+        "https://loans.example.com",
+        "http://localhost",
+        "http://localhost:5173",
+        "https://api.example.com:8443",
+    )
+
+
 @pytest.mark.parametrize(
     "hostname",
     [
@@ -113,6 +136,9 @@ def test_api_hostname_must_be_an_exact_dns_name(hostname: str) -> None:
         ({"AWS_ROLE_ARN": "not-an-arn"}, "AWS_ROLE_ARN must identify"),
         ({"AWS_REGION": "west"}, "AWS_REGION has an invalid format"),
         ({"ALLOWED_ORIGINS": "https://example.com/path"}, "origins without paths"),
+        ({"ALLOWED_ORIGINS": "https://:443"}, "origins without paths"),
+        ({"ALLOWED_ORIGINS": "https://[::1"}, "invalid hostname"),
+        ({"ALLOWED_ORIGINS": "https://example.com:not-a-port"}, "invalid port"),
         ({"ALLOWED_ORIGINS": "http://example.com"}, "must use HTTPS"),
         ({"ALLOWED_ORIGINS": "https://*.example.com"}, "origins without paths"),
         ({"REQUIRE_USER_ROLES": "false"}, "cannot be disabled in production"),

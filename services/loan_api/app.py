@@ -217,7 +217,7 @@ def problem_response(problem: ApiProblem, correlation_id: str) -> dict[str, Any]
 
 
 def header_value(event: dict[str, Any], name: str) -> str:
-    """Return an API Gateway header without relying on header-name casing."""
+    """Return a request header without relying on header-name casing."""
     expected = name.casefold()
     for key, value in (event.get("headers") or {}).items():
         if str(key).casefold() == expected:
