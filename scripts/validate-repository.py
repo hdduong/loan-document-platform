@@ -729,8 +729,13 @@ def main() -> None:
         "review_draft_pull_requests = $true",
         "review_on_push = $true",
         "contexts = @('validate', 'copilot-review')",
+        "azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
     ):
         require(required_fragment in protection_script, f"GitHub protection lacks: {required_fragment}")
+    require(
+        "aquasecurity/setup-trivy@" not in protection_script,
+        "GitHub protection still allows the retired setup-trivy action.",
+    )
 
     runtime_schema = load_json(ROOT / "contracts" / "runtime-config.schema.json")
     runtime_example = load_json(ROOT / "apps" / "web" / "public" / "runtime-config.example.json")

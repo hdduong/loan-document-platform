@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import importlib
 import inspect
 import logging
@@ -33,6 +34,10 @@ _SAFE_RESPONSE_HEADERS = {
 
 class DomainAdapterError(RuntimeError):
     """The framework-neutral loan API integration is not available."""
+
+
+class DomainResponseError(RuntimeError):
+    """The loan domain returned a response that the adapter cannot consume."""
 
 
 class RequestBodyProblem(RuntimeError):
@@ -170,8 +175,13 @@ def _domain_response(result: Any) -> Response:
         if str(name).casefold() in _SAFE_RESPONSE_HEADERS
     }
     body = result.get("body")
-    if result.get("isBase64Encoded") and isinstance(body, str):
-        content: bytes | str = base64.b64decode(body, validate=True)
+    if result.get("isBase64Encoded"):
+        if not isinstance(body, str):
+            raise DomainResponseError("The loan domain returned non-string Base64 content")
+        try:
+            content: bytes | str = base64.b64decode(body, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise DomainResponseError("The loan domain returned invalid Base64 content") from exc
     elif isinstance(body, (dict, list)):
         return JSONResponse(status_code=status, content=body, headers=headers)
     else:
@@ -326,6 +336,9 @@ def create_app(
         except DomainAdapterError:
             LOGGER.error("domain_adapter_unavailable correlation_id=%s", correlation_id)
             return _problem(503, "DOMAIN_ADAPTER_NOT_READY", "The domain service is unavailable", correlation_id)
+        except DomainResponseError:
+            LOGGER.error("domain_response_invalid correlation_id=%s", correlation_id)
+            return _problem(502, "DOMAIN_RESPONSE_INVALID", "The domain service returned an invalid response", correlation_id)
         except Exception:
             LOGGER.error("domain_dispatch_failed correlation_id=%s", correlation_id)
             return _problem(502, "DOMAIN_DEPENDENCY_ERROR", "The domain service request failed", correlation_id)

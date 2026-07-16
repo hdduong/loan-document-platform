@@ -665,6 +665,34 @@ def test_async_and_encoded_domain_responses_are_supported() -> None:
     assert binary_response.headers["content-type"] == "application/pdf"
 
 
+@pytest.mark.parametrize("malformed_body", ["not-base64!", "\N{SNOWMAN}", None, {"not": "base64"}])
+def test_malformed_base64_domain_response_is_a_sanitized_adapter_error(
+    malformed_body: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    test_client, _, _, _ = client(
+        domain=Domain(
+            {
+                "statusCode": 200,
+                "headers": {"content-type": "application/pdf"},
+                "body": malformed_body,
+                "isBase64Encoded": True,
+            }
+        )
+    )
+    caplog.set_level(logging.ERROR, logger="services.azure_api.main")
+
+    with test_client:
+        response = test_client.get("/v1/loans/23051", headers={"authorization": "Bearer token"})
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "DOMAIN_RESPONSE_INVALID"
+    assert response.json()["detail"] == "The domain service returned an invalid response"
+    assert str(malformed_body) not in response.text
+    assert str(malformed_body) not in caplog.text
+    assert "domain_response_invalid" in caplog.text
+
+
 def test_domain_session_configuration_and_dispatch_are_serialized() -> None:
     class ConcurrentDomain(Domain):
         def __init__(self) -> None:

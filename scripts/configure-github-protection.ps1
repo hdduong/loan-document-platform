@@ -92,8 +92,7 @@ if ($PSCmdlet.ShouldProcess($repository, 'Harden repository, Actions, branch, Co
         verified_allowed = $false
         patterns_allowed = @(
             'aws-actions/*',
-            'azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5',
-            'aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567'
+            'azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5'
         )
     } | Out-Null
 
