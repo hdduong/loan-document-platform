@@ -1,12 +1,14 @@
 # React UI handoff specification
 
-This document is the implementation brief for Claude Code. The OpenAPI file is authoritative if prose and schema differ.
+This document is the implementation brief for Claude Code. The OpenAPI file is authoritative if prose and schema differ. Azure Static Web Apps hosts the SPA, and the Entra-protected Azure Container Apps API is its only product API.
 
 ## Stack and structure
 
 Build a TypeScript React/Vite SPA in `apps/web` using MSAL Browser/React, React Router, TanStack Query, React Hook Form, Zod, a generated OpenAPI client, Vitest, Testing Library, MSW, Playwright, and axe.
 
 Suggested feature folders: `auth`, `api/generated`, `loans`, `documents`, `uploads`, `data-points`, and shared accessible components. Do not hand-code duplicate DTOs or scatter endpoint strings through components.
+
+The browser never calls an AWS Loan API, AppSync, the optional IDP Jobs REST API, DynamoDB, or an IDP workflow. It calls the Azure API for every domain/status/data operation. The only browser-to-AWS request is an exact operation performed with a short-lived upload or download grant returned after Azure authorization.
 
 ## Runtime configuration
 
@@ -75,12 +77,12 @@ Render `application/problem+json` safely with correlation ID. Never show raw HTM
 ## End-to-end user flow
 
 1. Create `loanId`. Display the returned immutable `loanInstanceId`.
-2. Initialize a document. The API returns stable `documentId`, physical `uploadId`, and presigned POST before bytes move.
+2. Initialize a document. The Azure API returns platform-issued stable `documentId`, physical `uploadId`, and presigned POST before bytes move.
 3. Validate one PDF client-side for usability and compute Base64 SHA-256. The server repeats all checks.
 4. Build `FormData` with every returned S3 field, append the PDF last, upload with progress, and do not send an Entra token to S3.
 5. After S3 success, call the upload `complete` endpoint. It sends no PDF. A timeout offers **Retry completion**, never **Upload again**.
 6. Poll document status starting near two seconds and back off to 15 seconds. Pause while hidden, resume on focus, abort on navigation, and stop on terminal state.
-7. On success, provide fresh grants for source PDF, selected PDF, and data-point download. Signed URLs are never logged or persisted.
+7. On success, request fresh Azure-authorized grants for source PDF, selected PDF, and data-point download. Signed URLs are never logged or persisted.
 8. Archive a terminal document version. `_001` is read-only; a replacement retains `documentId`, gets a new `uploadId`, and later becomes `_002`.
 9. Archive an active loan in one operation. Explain that every document is included and the snapshot becomes read-only. A processing/incomplete document blocks archive with `409`.
 10. Recreating the base `loanId` yields a new `loanInstanceId`; its later archive becomes the next sequence.
@@ -114,7 +116,7 @@ Download endpoints return a short-lived grant. Open it with `noopener,noreferrer
 1. Sign-in returns to the requested route; read-only users see no mutation actions.
 2. Double-click create produces one intent/resource.
 3. `LOAN_ALREADY_ACTIVE` navigates to the existing current loan.
-4. AWS-generated `documentId` appears before upload.
+4. Azure API-generated platform `documentId` appears before upload and is never replaced by an IDP object key, workflow ARN, or S3 version.
 5. Direct S3 POST has no Entra token and preserves returned fields.
 6. Completion timeout retries with the same key and does not reupload.
 7. Refresh during processing restores polling.
@@ -125,4 +127,4 @@ Download endpoints return a short-lived grant. Open it with `noopener,noreferrer
 12. Recreated loan has a new `loanInstanceId` and later archives to the next sequence.
 13. Deterministic handling exists for 401, 403, 404, 409, 410, 413, 415, 422, 429, offline, and 5xx.
 14. No token, signed URL, PDF, filename, or data-point value reaches logs or persistent browser storage.
-15. Generated client compiles against the checked-in OpenAPI contract; Playwright/axe tests pass with MSW and a staging smoke suite covers real Entra/API/S3 behavior.
+15. Generated client compiles against the checked-in OpenAPI contract; Playwright/axe tests pass with MSW and a staging smoke suite covers real Entra/Azure API/S3/headless-IDP behavior.

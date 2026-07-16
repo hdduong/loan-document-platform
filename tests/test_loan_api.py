@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -58,16 +60,28 @@ class _Client:
     pass
 
 
+class _Config:
+    def __init__(self, **kwargs: object) -> None:
+        for name, value in kwargs.items():
+            setattr(self, name, value)
+
+
 def _load_api_module():
     boto3 = types.ModuleType("boto3")
-    boto3.resource = lambda *_args, **_kwargs: _Resource()
-    boto3.client = lambda *_args, **_kwargs: _Client()
+
+    def reject_ambient_client(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("loan_api constructed an AWS dependency during import")
+
+    boto3.resource = reject_ambient_client
+    boto3.client = reject_ambient_client
     boto3_dynamodb = types.ModuleType("boto3.dynamodb")
     boto3_conditions = types.ModuleType("boto3.dynamodb.conditions")
     boto3_conditions.Key = _Key
     boto3_types = types.ModuleType("boto3.dynamodb.types")
     boto3_types.TypeSerializer = _Serializer
     botocore = types.ModuleType("botocore")
+    botocore_config = types.ModuleType("botocore.config")
+    botocore_config.Config = _Config
     botocore_exceptions = types.ModuleType("botocore.exceptions")
     botocore_exceptions.ClientError = _ClientError
 
@@ -77,6 +91,7 @@ def _load_api_module():
         "boto3.dynamodb.conditions": boto3_conditions,
         "boto3.dynamodb.types": boto3_types,
         "botocore": botocore,
+        "botocore.config": botocore_config,
         "botocore.exceptions": botocore_exceptions,
     }
     root = Path(__file__).resolve().parents[1]
@@ -94,6 +109,7 @@ def _load_api_module():
             "ORIGIN_VERIFY_SECRET": "origin-secret",
             "ALLOWED_CLIENT_IDS": "client-id,service-client-id",
             "REQUIRE_USER_ROLES": "true",
+            "UPLOAD_PROCESSOR_ARN": "arn:aws:lambda:us-west-2:111122223333:function:upload-processor",
         },
         clear=False,
     ), patch.dict(sys.modules, modules):
@@ -225,6 +241,17 @@ class IdempotencyAndPaginationTests(unittest.TestCase):
             items = api.query_all(KeyConditionExpression="expression", ConsistentRead=True)
         self.assertEqual(items, [{"page": 1}, {"page": 2}])
         self.assertEqual(table.calls[1]["ExclusiveStartKey"], {"PK": "next"})
+
+    def test_query_all_rejects_a_partition_above_the_configured_item_limit(self) -> None:
+        class Table:
+            def query(self, **_: object) -> dict[str, object]:
+                return {"Items": [{"page": 1}, {"page": 2}]}
+
+        with patch.object(api, "TABLE", Table()), patch.object(api, "MAXIMUM_QUERY_ITEMS", 1):
+            with self.assertRaises(api.ApiProblem) as caught:
+                api.query_all(KeyConditionExpression="expression", ConsistentRead=True)
+        self.assertEqual(caught.exception.code, "QUERY_RESULT_LIMIT_EXCEEDED")
+        self.assertNotIn("page", caught.exception.title)
 
     def test_recompletion_with_a_new_key_persists_its_idempotent_response(self) -> None:
         document_id = "doc_11111111-1111-4111-8111-111111111111"
@@ -379,8 +406,13 @@ class ArchiveReadTests(unittest.TestCase):
         ],
     }
 
-    def _table(self):
-        archive = self.archive
+    def _table(self, manifest: dict[str, object] | None = None):
+        payload = self.manifest if manifest is None else manifest
+        raw = json.dumps(payload).encode("utf-8")
+        archive = {
+            **self.archive,
+            "manifestChecksumSha256": base64.b64encode(hashlib.sha256(raw).digest()).decode("ascii"),
+        }
 
         class Table:
             def get_item(self, **kwargs: object) -> dict[str, object]:
@@ -394,10 +426,16 @@ class ArchiveReadTests(unittest.TestCase):
 
     def _s3(self, manifest: dict[str, object] | None = None):
         payload = self.manifest if manifest is None else manifest
+        raw = json.dumps(payload).encode("utf-8")
+        checksum = base64.b64encode(hashlib.sha256(raw).digest()).decode("ascii")
 
         class S3:
             def get_object(self, **_: object) -> dict[str, object]:
-                return {"Body": io.BytesIO(json.dumps(payload).encode("utf-8"))}
+                return {
+                    "Body": io.BytesIO(raw),
+                    "ChecksumSHA256": checksum,
+                    "ContentLength": len(raw),
+                }
 
             def generate_presigned_url(self, *_: object, **__: object) -> str:
                 return "https://example.invalid/pinned-download"
@@ -416,7 +454,7 @@ class ArchiveReadTests(unittest.TestCase):
 
     def test_archive_manifest_identity_is_verified(self) -> None:
         wrong_manifest = {**self.manifest, "loanId": "different"}
-        with patch.object(api, "TABLE", self._table()), patch.object(api, "S3", self._s3(wrong_manifest)):
+        with patch.object(api, "TABLE", self._table(wrong_manifest)), patch.object(api, "S3", self._s3(wrong_manifest)):
             with self.assertRaises(api.ApiProblem) as caught:
                 api.load_loan_archive("tenant-id", "23051", "1")
         self.assertEqual(caught.exception.code, "ARCHIVE_MANIFEST_INVALID")

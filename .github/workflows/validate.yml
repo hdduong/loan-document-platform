@@ -43,14 +43,36 @@ jobs:
       - name: Lint Python
         run: ruff check services scripts tests
 
-      - name: Run unit tests
-        run: pytest -q
+      - name: Run Python tests with coverage
+        run: |
+          pytest -q --cov=services --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
+          python scripts/check-python-coverage.py coverage.json
 
       - name: Validate OpenAPI
         run: openapi-spec-validator contracts/openapi/loan-api.yaml
 
       - name: Lint CloudFormation
         run: cfn-lint 'infra/**/*.yaml'
+
+      - name: Compile Azure Bicep
+        run: az bicep build --file infra/azure/main.bicep --stdout > /dev/null
+
+      - name: Build secretless non-root API container
+        run: |
+          docker build --file services/azure_api/Dockerfile --tag loan-document-api:validation .
+          test "$(docker image inspect --format '{{.Config.User}}' loan-document-api:validation)" = '10001:10001'
+
+      - name: Install pinned Trivy scanner
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.72.0
+          cache: true
+
+      - name: Scan exact validation image and generate SBOM
+        run: |
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --timeout 10m --no-progress loan-document-api:validation
+          trivy image --format cyclonedx --output /tmp/loan-document-api.cdx.json --timeout 10m --no-progress loan-document-api:validation
+          test -s /tmp/loan-document-api.cdx.json
 
       - name: Set up Node
         if: ${{ hashFiles('apps/web/package.json') != '' }}
@@ -65,6 +87,10 @@ jobs:
         working-directory: apps/web
         run: |
           npm ci
+          npm audit --audit-level=high
+          npx playwright install --with-deps chromium
           npm run lint
-          npm test -- --run
+          npm run typecheck
+          npm run test:coverage
           npm run build
+          npm run test:e2e:ci

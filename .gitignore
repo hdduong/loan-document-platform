@@ -8,6 +8,17 @@
 /.idp-build/
 /dist/
 /coverage/
+/.coverage
+/coverage*.json
+/htmlcov/
+/playwright-report/
+/test-results/
+/apps/web/playwright/.auth/
+/apps/web/coverage/
+/apps/web/dist/
+/apps/web/playwright-report/
+/apps/web/test-results/
+/apps/web/blob-report/
 
 # Dependencies and caches
 node_modules/
@@ -57,6 +68,7 @@ cdk.out/
 entra-state*.json
 deployment-outputs*.json
 /.local/
+/.azure/
 
 # Claude Code and Spec Kit local state (commit .claude/skills and .specify assets)
 CLAUDE.local.md

@@ -6,6 +6,8 @@ Before changing UI behavior, also read `../../.specify/memory/constitution.md` a
 
 Required stack: React, TypeScript, Vite, React Router, MSAL Browser/React, TanStack Query, React Hook Form, Zod, Vitest, Testing Library, MSW, Playwright, and axe.
 
+Quality gates are mandatory: `npm run typecheck`, `npm run test:coverage`, the production build, and `npm run test:e2e:ci` must pass. Vitest must include all authored `src/**/*.ts` and `src/**/*.tsx` files and enforce per-file 80% statements, lines, functions, and branches. Generated client/type exclusions must be narrow and separately protected by generation-drift and compilation checks. Playwright must cover every affected journey with synthetic identity/API/S3 behavior, block unexpected external network calls, and use `msw/node` or Playwright routing rather than a production service worker.
+
 Non-negotiable security rules:
 
 - Use Entra authorization code + PKCE and `sessionStorage` for MSAL cache.

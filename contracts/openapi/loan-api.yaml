@@ -3,9 +3,13 @@ info:
   title: Loan Document Platform API
   version: 1.0.0
   description: |
-    Entra-protected API for loan lifecycle, direct document upload, IDP status,
-    immutable document/loan archives, extracted data, and artifact download grants.
-    Archive is not deletion. All mutation routes require Idempotency-Key.
+    Sole public, Entra-protected Azure API for loan lifecycle, direct document
+    upload, IDP status, immutable document/loan archives, extracted data, and
+    artifact download grants. AWS remains a private processing/data plane;
+    callers do not use an AWS Loan API or AppSync endpoint. Archive is not
+    deletion. All mutation routes require Idempotency-Key. Production `/v1`
+    requests accept only the configured custom API host; the application rejects
+    an unexpected product host with a `421` problem before domain or AWS access.
 servers:
   - url: https://api.loans.example.com
     description: Placeholder production URL; runtime configuration supplies the real domain.
@@ -70,6 +74,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LoanView' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/archive:
@@ -108,6 +113,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LoanArchiveView' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}:
@@ -299,7 +305,10 @@ paths:
             schema: { $ref: '#/components/schemas/CreateUploadRequest' }
       responses:
         '201':
-          description: Stable logical document and first physical upload were initialized.
+          description: >-
+            Stable logical document and first physical upload were initialized.
+            An exact idempotent retry mints a fresh short-lived upload grant only
+            while that upload is still awaiting bytes; signed fields are never persisted.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UploadSession' }
@@ -326,7 +335,9 @@ paths:
             schema: { $ref: '#/components/schemas/CreateUploadRequest' }
       responses:
         '201':
-          description: Replacement upload initialized under the stable document ID.
+          description: >-
+            Replacement upload initialized under the stable document ID. An exact
+            idempotent retry renews the short-lived grant only before upload completion.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UploadSession' }
@@ -381,6 +392,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DocumentView' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/documents/{documentId}/archive:
@@ -505,6 +517,7 @@ paths:
               schema: { type: object, additionalProperties: true }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/documents/{documentId}/data-points/download:
@@ -557,7 +570,13 @@ components:
       description: |
         Delegated tokens must carry both the operation's `scp` and assigned app role.
         App-only tokens use the `.default` client-credentials request and must carry
-        the assigned application role plus `idtyp=app`.
+        the assigned application role, `idtyp=app`, and `azpacr=2`, proving that the
+        allowlisted client authenticated to Entra with a certificate. Client-secret
+        app tokens are rejected. A missing, malformed, expired, or cryptographically
+        invalid bearer token returns `401`. A cryptographically valid token that
+        fails the exact tenant/client allowlist, token-type, certificate, scope, or
+        role policy returns `403`. Error bodies use the `Problem` schema when the
+        request reaches the application authorization boundary.
       flows:
         authorizationCode:
           authorizationUrl: https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/authorize
@@ -728,6 +747,10 @@ components:
           description: Base64-encoded 32-byte SHA-256 digest required by S3 checksum headers.
           pattern: '^[A-Za-z0-9+/]{43}=$'
     UploadSession:
+      description: >-
+        Short-lived S3 POST grant returned only after Azure authorization. Stable
+        IDs may be retained for idempotency; policy, signature, and security-token
+        fields must not be stored in the registry.
       type: object
       required: [loanId, documentId, uploadId, status, expiresAt, upload]
       properties:

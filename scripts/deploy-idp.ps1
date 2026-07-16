@@ -36,7 +36,11 @@ foreach ($command in 'aws', 'git', 'python', 'sam', 'docker', 'node', 'npm') {
 Assert-AwsIdentity -Profile $config.awsProfile -Region $config.awsRegion -ExpectedAccountId $config.awsAccountId | Out-Null
 
 $bootstrap = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.bootstrapStackName
-foreach ($requiredOutput in 'ArtifactBucketName', 'CloudFormationExecutionRoleArn') {
+foreach ($requiredOutput in @(
+    'ArtifactBucketName',
+    'IdpCloudFormationExecutionRoleArn',
+    'IdpRolePermissionsBoundaryArn'
+)) {
     if (-not $bootstrap.ContainsKey($requiredOutput)) {
         throw "Bootstrap stack '$($config.bootstrapStackName)' is missing '$requiredOutput'."
     }
@@ -65,6 +69,7 @@ foreach ($entry in @(
 }
 
 $vendorDirectory = Join-Path $root ".local/vendor/idp-$($lock.version)"
+$stackPolicyPath = Join-Path $root 'infra/stack-policies/protect-stateful-resources.json'
 if (-not (Test-Path -LiteralPath (Join-Path $vendorDirectory '.git'))) {
     [IO.Directory]::CreateDirectory((Split-Path $vendorDirectory)) | Out-Null
     Invoke-Checked -Command git -Arguments @(
@@ -126,14 +131,32 @@ $deployArguments = $cliPrefix + @(
     '--custom-config', $screenPath,
     '--max-concurrent', '10',
     '--log-level', 'INFO',
-    '--parameters', "PostProcessingLambdaHookFunctionArn=$($platform.IdpPostprocessorFunctionArn)",
-    '--role-arn', $bootstrap.CloudFormationExecutionRoleArn,
+    '--parameters', "PostProcessingLambdaHookFunctionArn=$($platform.IdpPostprocessorFunctionArn),PermissionsBoundaryArn=$($bootstrap.IdpRolePermissionsBoundaryArn)",
+    '--role-arn', $bootstrap.IdpCloudFormationExecutionRoleArn,
     '--bucket-basename', $artifactBucketBaseName,
     '--prefix', "idp/$($lock.version)",
     '--wait'
 )
 if ($CleanBuild) { $deployArguments += '--clean-build' }
+$idpBeforeDeployment = Get-AwsCloudFormationStackDescription `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.idpStackName `
+    -AllowMissing
+if ($null -ne $idpBeforeDeployment) {
+    Set-AwsStatefulStackPolicy `
+        -Profile $config.awsProfile `
+        -Region $config.awsRegion `
+        -StackName $config.idpStackName `
+        -PolicyPath $stackPolicyPath
+}
 Invoke-Checked -Command $pythonExecutable -Arguments $deployArguments -FailureMessage 'Pinned headless IDP deployment failed.'
+
+Set-AwsStatefulStackPolicy `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.idpStackName `
+    -PolicyPath $stackPolicyPath
 
 foreach ($entry in @(
     @{ Path = $screenPath; Version = [string]$manifest.screen.name; Description = [string]$manifest.screen.purpose },

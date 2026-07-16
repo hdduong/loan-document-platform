@@ -3,7 +3,11 @@
 This Lambda accepts two at-least-once event sources:
 
 * ``GuardDuty Malware Protection Object Scan Result`` events; and
-* the synthetic ``Client Upload Complete`` event emitted by the loan API.
+* upload-record changes from the DynamoDB Stream.
+
+The loan API also emits a synthetic ``Client Upload Complete`` event as a
+latency optimization. The stream is the durable handoff if that direct invoke
+is interrupted after the completion transaction commits.
 
 The two signals may arrive in either order.  A GuardDuty result is stored under
 the upload using a hash of the S3 VersionId, so a result for one version can
@@ -43,6 +47,13 @@ CLIENT_COMPLETE_DETAIL_TYPE = "Client Upload Complete"
 CLEAN_SCAN_RESULT = "NO_THREATS_FOUND"
 THREAT_SCAN_RESULT = "THREATS_FOUND"
 TERMINAL_UPLOAD_STATUSES = {"QUEUED", "EXTRACTING", "SUCCEEDED", "REJECTED", "HOLD", "FAILED"}
+STREAM_SIGNAL_FIELDS = (
+    "status",
+    "clientCompletedAt",
+    "sourceVersionId",
+    "malwareScanStatus",
+    "malwareScanVersionId",
+)
 
 _AWS: dict[str, Any] = {}
 
@@ -114,6 +125,76 @@ def serialize_map(values: dict[str, Any]) -> dict[str, Any]:
 
     serializer = TypeSerializer()
     return {name: serializer.serialize(value) for name, value in values.items()}
+
+
+def deserialize_stream_image(image: Any) -> dict[str, Any]:
+    """Deserialize one DynamoDB Streams image and reject malformed records."""
+
+    if not isinstance(image, dict):
+        raise EventError("DYNAMODB_STREAM_IMAGE_REQUIRED")
+    from boto3.dynamodb.types import TypeDeserializer
+
+    deserializer = TypeDeserializer()
+    try:
+        return {str(name): deserializer.deserialize(value) for name, value in image.items()}
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise EventError("DYNAMODB_STREAM_IMAGE_INVALID") from exc
+
+
+def stream_record_signal(record: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """Return a changed VALIDATING upload and its exact source version."""
+
+    if record.get("eventSource") != "aws:dynamodb":
+        raise EventError("UNSUPPORTED_STREAM_SOURCE")
+    if record.get("eventName") not in {"INSERT", "MODIFY"}:
+        return None
+    stream = record.get("dynamodb")
+    if not isinstance(stream, dict):
+        raise EventError("DYNAMODB_STREAM_DETAIL_REQUIRED")
+    current = deserialize_stream_image(stream.get("NewImage"))
+    if current.get("entityType") != "UPLOAD" or current.get("status") != "VALIDATING":
+        return None
+    previous = deserialize_stream_image(stream.get("OldImage") or {})
+    if not any(previous.get(name) != current.get(name) for name in STREAM_SIGNAL_FIELDS):
+        return None
+    for name in ("PK", "SK", "uploadId", "clientCompletedAt", "sourceVersionId"):
+        if not current.get(name):
+            raise EventError("VALIDATING_UPLOAD_STREAM_RECORD_INVALID")
+    return current, str(current["sourceVersionId"])
+
+
+def handle_stream_event(event: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    """Reconcile a DynamoDB batch with partial failures and safe logging."""
+
+    records = event.get("Records")
+    if not isinstance(records, list) or not records:
+        raise EventError("DYNAMODB_STREAM_RECORDS_REQUIRED")
+    failures: list[dict[str, str]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise EventError("DYNAMODB_STREAM_RECORD_INVALID")
+        event_id = str(record.get("eventID", ""))
+        if not event_id:
+            raise EventError("DYNAMODB_STREAM_EVENT_ID_REQUIRED")
+        stream = record.get("dynamodb")
+        if not isinstance(stream, dict) or not stream.get("SequenceNumber"):
+            raise EventError("DYNAMODB_STREAM_SEQUENCE_NUMBER_REQUIRED")
+        sequence_number = str(stream["SequenceNumber"])
+        try:
+            signal = stream_record_signal(record)
+            if signal is not None:
+                reconcile(*signal)
+        except Exception as exc:
+            # The item identifier and exception type are sufficient for
+            # operations; the stream image can contain sensitive filenames.
+            LOGGER.warning(
+                "upload_stream_record_failed event_id=%s error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+            # Lambda expects the DynamoDB sequence number here, not eventID.
+            failures.append({"itemIdentifier": sequence_number})
+    return {"batchItemFailures": failures}
 
 
 def event_object(event: dict[str, Any]) -> dict[str, str]:
@@ -651,6 +732,8 @@ def reconcile(upload: dict[str, Any], requested_version_id: str) -> dict[str, An
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    if isinstance(event.get("Records"), list):
+        return handle_stream_event(event)
     normalized = event_object(event)
     upload = find_upload(normalized["bucket"], normalized["key"])
     if normalized["kind"] == "guardduty":

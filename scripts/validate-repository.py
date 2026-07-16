@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import tomllib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import unquote
@@ -134,6 +135,371 @@ def validate_copilot_review_gate() -> None:
         require(required_fragment in script, f"Copilot exact-head gate is missing: {required_fragment}")
 
 
+def validate_python_quality_gate() -> None:
+    requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines()
+    require("coverage==7.15.2" in requirements, "Coverage.py must remain pinned.")
+    require("pytest-cov==7.1.0" in requirements, "pytest-cov must remain pinned.")
+
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)
+    coverage = project.get("tool", {}).get("coverage", {})
+    run = coverage.get("run", {})
+    require(run.get("branch") is True, "Python coverage must collect branch data.")
+    require(run.get("source") == ["services"], "Python coverage must include every service module.")
+
+    checker = (ROOT / "scripts" / "check-python-coverage.py").read_text(encoding="utf-8")
+    require("MINIMUM_LINE_COVERAGE = 80.0" in checker, "Python per-file coverage floor changed.")
+    require("PRODUCTION_ROOT = PurePosixPath(\"services\")" in checker, "Python coverage scope changed.")
+
+    for workflow_name in ("validate.yml", "deploy-prod.yml"):
+        workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+        for fragment in (
+            "--cov=services",
+            "--cov-branch",
+            "--cov-report=json:coverage.json",
+            "python scripts/check-python-coverage.py coverage.json",
+        ):
+            require(fragment in workflow, f"{workflow_name} does not enforce Python coverage: {fragment}")
+
+
+def validate_web_quality_gate() -> None:
+    web = ROOT / "apps" / "web"
+    package_path = web / "package.json"
+    authored_source = any(
+        path.is_file()
+        for directory in (web / "src", web / "e2e")
+        if directory.exists()
+        for path in directory.rglob("*")
+    )
+    require(not authored_source or package_path.is_file(), "React source exists without apps/web/package.json.")
+
+    validate_workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
+    for fragment in (
+        "npm audit --audit-level=high",
+        "npm run typecheck",
+        "npm run test:coverage",
+        "npx playwright install --with-deps chromium",
+        "npm run test:e2e:ci",
+    ):
+        require(fragment in validate_workflow, f"React validation workflow lacks: {fragment}")
+
+    deploy_workflow = (ROOT / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+    deploy_all = (ROOT / "scripts" / "deploy-all.ps1").read_text(encoding="utf-8")
+    deploy_web = (ROOT / "scripts" / "deploy-web.ps1").read_text(encoding="utf-8")
+    require("npm audit --audit-level=high" in deploy_web, "Production web deployment lacks the dependency vulnerability gate.")
+    for prohibited in ("skip_ui_tests", "SKIP_UI_TESTS", "SkipUiTests"):
+        require(prohibited not in deploy_workflow + deploy_all, f"Production UI test bypass remains: {prohibited}")
+    require("SkipTests" not in deploy_web, "Production web deployment must not permit skipping tests.")
+    require("--if-present" not in deploy_web, "Production web tests must fail closed when scripts are missing.")
+    for fragment in ("npm run typecheck", "npm run test:coverage", "npm run test:e2e:ci"):
+        require(fragment in deploy_web, f"Production web deployment lacks: {fragment}")
+
+    if not package_path.is_file():
+        return
+
+    package = load_json(package_path)
+    require((web / "package-lock.json").is_file(), "React package-lock.json is required.")
+    scripts = package.get("scripts", {})
+    for name in ("lint", "typecheck", "test:coverage", "build", "test:e2e", "test:e2e:ci"):
+        require(isinstance(scripts.get(name), str) and scripts[name], f"React package script is required: {name}")
+    dependencies = {**package.get("dependencies", {}), **package.get("devDependencies", {})}
+    for name in ("@axe-core/playwright", "@playwright/test", "@vitest/coverage-v8", "msw"):
+        require(name in dependencies, f"React test dependency is required: {name}")
+
+    vitest_path = web / "vitest.config.ts"
+    playwright_path = web / "playwright.config.ts"
+    require(vitest_path.is_file(), "React Vitest coverage configuration is required.")
+    require(playwright_path.is_file(), "React Playwright configuration is required.")
+    vitest = vitest_path.read_text(encoding="utf-8")
+    require(re.search(r"perFile\s*:\s*true", vitest) is not None, "Vitest coverage must be per-file.")
+    for metric in ("lines", "statements", "functions", "branches"):
+        require(
+            re.search(rf"{metric}\s*:\s*(?:8[0-9]|9[0-9]|100)\b", vitest) is not None,
+            f"Vitest per-file {metric} coverage must be at least 80%.",
+        )
+    require(any((web / "e2e").rglob("*.spec.ts")), "At least one Playwright integration test is required.")
+
+
+def validate_azure_control_plane() -> None:
+    """Keep Azure as the sole public API and AWS as a private headless data plane."""
+
+    feature = load_json(ROOT / ".specify" / "feature.json")
+    require(
+        feature.get("feature_directory") == "specs/002-azure-api-control-plane",
+        "The Azure API control-plane packet must remain the active feature.",
+    )
+
+    for relative_path in (
+        "infra/azure/main.bicep",
+        "services/azure_api/main.py",
+        "services/azure_api/auth.py",
+        "services/azure_api/aws_credentials.py",
+        "services/azure_api/settings.py",
+        "services/azure_api/Dockerfile",
+        "services/azure_api/requirements.txt",
+        "scripts/deploy-azure.ps1",
+        "scripts/deploy-all.ps1",
+        "scripts/deploy-web.ps1",
+        "scripts/cutover-api-domain.ps1",
+        "scripts/provision-entra-federation.ps1",
+    ):
+        require((ROOT / relative_path).is_file(), f"Azure control-plane artifact is missing: {relative_path}")
+
+    dockerfile = (ROOT / "services" / "azure_api" / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    for sensitive_pattern in ("**/.env", "**/*.pem", "**/*.key", "**/*.pfx", "**/*.pdf"):
+        require(
+            sensitive_pattern in dockerignore,
+            f"ACR build context does not exclude sensitive file pattern: {sensitive_pattern}",
+        )
+    require(
+        re.search(r"^FROM\s+python:[^\s]+@sha256:[0-9a-f]{64}$", dockerfile, re.MULTILINE) is not None,
+        "Azure API base image must be pinned by immutable digest.",
+    )
+    require(
+        "FROM python:3.13.14-slim-bookworm@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64"
+        in dockerfile,
+        "Azure API must use the reviewed security-clean Python base digest.",
+    )
+    require("USER 10001:10001" in dockerfile, "Azure API container must run as the dedicated non-root user.")
+    require("--no-access-log" in dockerfile, "Azure API must not log business identifiers from raw request paths.")
+    require(
+        "--mount=type=secret,id=enterprise_ca,required=false" in dockerfile,
+        "Enterprise CA support must use an ephemeral BuildKit secret.",
+    )
+    for prohibited in ("--trusted-host", "PIP_TRUSTED_HOST", "PIP_NO_VERIFY"):
+        require(prohibited not in dockerfile, f"Docker TLS verification bypass is prohibited: {prohibited}")
+
+    runtime_requirements = (ROOT / "services" / "azure_api" / "requirements.txt").read_text(encoding="utf-8")
+    development_requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    for required_pin in (
+        "azure-identity==1.25.3",
+        "boto3==1.43.49",
+        "fastapi==0.139.1",
+        "PyJWT[crypto]==2.13.0",
+        "starlette==1.3.1",
+        "uvicorn==0.51.0",
+    ):
+        require(required_pin in runtime_requirements, f"Reviewed Azure runtime pin is missing: {required_pin}")
+    for required_pin in (
+        "azure-identity==1.25.3",
+        "boto3==1.43.49",
+        "fastapi==0.139.1",
+        "PyJWT[crypto]==2.13.0",
+        "starlette==1.3.1",
+    ):
+        require(required_pin in development_requirements, f"Development/runtime pin is inconsistent: {required_pin}")
+
+    for retired_path in ("scripts/deploy-edge.ps1", "infra/edge/template.yaml"):
+        require(
+            not (ROOT / retired_path).exists(),
+            f"Retired AWS edge deployment source must not remain runnable: {retired_path}",
+        )
+
+    lock = load_json(ROOT / "vendor" / "idp.lock.json")
+    require(lock.get("deploymentMode") == "headless", "The pinned IDP deployment must remain headless.")
+    idp_deploy = (ROOT / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
+    require("--headless" in idp_deploy, "The IDP deployment script must enforce --headless.")
+
+    aws_template = (ROOT / "infra" / "api" / "template.yaml").read_text(encoding="utf-8")
+    for prohibited in (
+        "AWS::ApiGateway",
+        "AWS::AppSync",
+        "AWS::CloudFront",
+        "LoanApiFunction:",
+        "appsync:",
+    ):
+        require(prohibited not in aws_template, f"Obsolete AWS public API surface remains: {prohibited}")
+    for required_fragment in (
+        "EntraTenantOidcProvider:",
+        "AzureApiRuntimeRole:",
+        "RolePermissionsBoundaryArn:",
+        "PermissionsBoundary: !Ref RolePermissionsBoundaryArn",
+        "sts:AssumeRoleWithWebIdentity",
+        "/:aud",
+        "/:sub",
+        "${SourceBucket.Arn}/quarantine/tenants/*",
+        "prefix: quarantine/tenants/",
+        "UploadCompletionStreamMapping:",
+        "Type: AWS::Lambda::EventSourceMapping",
+        "EventSourceArn: !GetAtt RegistryTable.StreamArn",
+        "dynamodb:GetRecords",
+        "BisectBatchOnFunctionError: true",
+        "StartingPosition: TRIM_HORIZON",
+        "Destination: !GetAtt UploadProcessorDlq.Arn",
+        "ReportBatchItemFailures",
+    ):
+        require(required_fragment in aws_template, f"AWS federation template lacks: {required_fragment}")
+    require(
+        aws_template.count("PermissionsBoundary: !Ref RolePermissionsBoundaryArn") == 5,
+        "Every platform-created IAM role must use the bootstrap permissions boundary.",
+    )
+
+    bootstrap_template = (ROOT / "infra" / "bootstrap" / "template.yaml").read_text(encoding="utf-8")
+    for required_fragment in (
+        "PlatformCloudFormationExecutionRole:",
+        "IdpCloudFormationExecutionRole:",
+        "PlatformRolePermissionsBoundary:",
+        "IdpRolePermissionsBoundary:",
+        "iam:PermissionsBoundary:",
+        "iam:PolicyARN:",
+        "iam:PassedToService:",
+        "DenyPlatformBoundaryRemoval",
+        "DenyIdpBoundaryRemoval",
+        "stack/${PlatformStackName}/*",
+        "stack/${IdpStackName}/*",
+    ):
+        require(required_fragment in bootstrap_template, f"AWS deployment least privilege lacks: {required_fragment}")
+    require(
+        "\n  CloudFormationExecutionRole:\n" not in bootstrap_template,
+        "The obsolete shared CloudFormation execution role must not be restored.",
+    )
+
+    stack_policy = load_json(ROOT / "infra" / "stack-policies" / "protect-stateful-resources.json")
+    protected_types: set[str] = set()
+    protected_actions: set[str] = set()
+    for statement in stack_policy.get("Statement", []):
+        if statement.get("Effect") != "Deny":
+            continue
+        actions = statement.get("Action", [])
+        protected_actions.update([actions] if isinstance(actions, str) else actions)
+        protected_types.update(statement.get("Condition", {}).get("StringEquals", {}).get("ResourceType", []))
+    require(
+        {"Update:Delete", "Update:Replace"}.issubset(protected_actions),
+        "Stateful stack policy must deny replacement and deletion.",
+    )
+    require(
+        {"AWS::DynamoDB::Table", "AWS::KMS::Key", "AWS::S3::Bucket"}.issubset(protected_types),
+        "Stateful stack policy must protect DynamoDB, KMS, and S3 resource types.",
+    )
+
+    deploy_platform = (ROOT / "scripts" / "deploy-platform.ps1").read_text(encoding="utf-8")
+    deploy_idp = (ROOT / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
+    for required_fragment in (
+        "PlatformCloudFormationExecutionRoleArn",
+        "PlatformRolePermissionsBoundaryArn",
+        "Set-AwsStatefulStackPolicy",
+    ):
+        require(required_fragment in deploy_platform, f"Platform deployment gate lacks: {required_fragment}")
+    for required_fragment in (
+        "IdpCloudFormationExecutionRoleArn",
+        "IdpRolePermissionsBoundaryArn",
+        "PermissionsBoundaryArn=",
+        "Set-AwsStatefulStackPolicy",
+    ):
+        require(required_fragment in deploy_idp, f"IDP deployment gate lacks: {required_fragment}")
+
+    loan_runtime = (ROOT / "services" / "loan_api" / "app.py").read_text(encoding="utf-8")
+    require(
+        'key = f"quarantine/tenants/' in loan_runtime,
+        "New source uploads must use the GuardDuty-protected top-level quarantine prefix.",
+    )
+    for prohibited in ("boto3.resource(", "boto3.client("):
+        require(prohibited not in loan_runtime, f"Loan domain constructs an ambient AWS dependency: {prohibited}")
+    for required_fragment in (
+        "connect_timeout=3",
+        "read_timeout=10",
+        'retries={"mode": "standard", "total_max_attempts": 3}',
+        "tcp_keepalive=True",
+        "MAXIMUM_QUERY_ITEMS",
+        "MAXIMUM_LOAN_ARCHIVE_DOCUMENTS",
+        "MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES",
+    ):
+        require(required_fragment in loan_runtime, f"Loan runtime hardening lacks: {required_fragment}")
+
+    azure_bicep = (ROOT / "infra" / "azure" / "main.bicep").read_text(encoding="utf-8")
+    for required_fragment in (
+        "Microsoft.App/containerApps",
+        "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "Microsoft.ContainerRegistry/registries",
+        "Microsoft.Web/staticSites",
+        "apiCustomDomainCertificateId",
+        "customDomains:",
+        "param maximumQueryItems int = 5000",
+        "param maximumLoanArchiveDocuments int = 500",
+        "param maximumLoanArchiveManifestBytes int = 4194304",
+        "name: 'MAXIMUM_QUERY_ITEMS'",
+        "name: 'MAXIMUM_LOAN_ARCHIVE_DOCUMENTS'",
+        "name: 'MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES'",
+    ):
+        require(required_fragment in azure_bicep, f"Azure Bicep lacks: {required_fragment}")
+
+    azure_runtime = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "services" / "azure_api").glob("*.py")
+    )
+    require("HOST_NOT_ALLOWED" in azure_runtime, "Production product routes must enforce the custom API hostname.")
+    for prohibited in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "LOAN_API_ORIGIN_VERIFY_SECRET",
+        "AppSync",
+    ):
+        require(prohibited not in azure_runtime, f"Azure runtime contains a prohibited integration: {prohibited}")
+
+    active_deployment_files = [
+        *sorted((ROOT / "scripts").glob("*.ps1")),
+        *sorted((ROOT / ".github" / "workflows").glob("*.yml")),
+        ROOT / "infra" / "bootstrap" / "template.yaml",
+    ]
+    active_deployment = "\n".join(
+        path.read_text(encoding="utf-8") for path in active_deployment_files if path.is_file()
+    )
+    for prohibited in (
+        "LOAN_API_ORIGIN_VERIFY_SECRET",
+        "OriginVerifySecret",
+        "deploy-edge.ps1",
+        "SkipEdge",
+        "cloudfront:*",
+        "apigateway:*",
+        "wafv2:*",
+        "wafv2.amazonaws.com",
+    ):
+        require(
+            prohibited not in active_deployment,
+            f"Retired AWS public-edge integration remains runnable: {prohibited}",
+        )
+
+    deploy_all = (ROOT / "scripts" / "deploy-all.ps1").read_text(encoding="utf-8")
+    for required_fragment in ("deploy-azure.ps1", "deploy-platform.ps1"):
+        require(required_fragment in deploy_all, f"Deployment orchestrator lacks: {required_fragment}")
+    deploy_web = (ROOT / "scripts" / "deploy-web.ps1").read_text(encoding="utf-8")
+    require("staticwebapp" in deploy_web.lower(), "Web deployment must target Azure Static Web Apps.")
+    for prohibited in ("cloudfront", "s3 sync", "UiDistributionId"):
+        require(prohibited.lower() not in deploy_web.lower(), f"Web deployment still targets AWS edge hosting: {prohibited}")
+
+    deploy_azure = (ROOT / "scripts" / "deploy-azure.ps1").read_text(encoding="utf-8")
+    for required_fragment in (
+        "trivy image",
+        "--severity HIGH,CRITICAL",
+        "--ignore-unfixed",
+        "--format cyclonedx",
+        "Production deployment cannot skip",
+        "Get-LiveApiCustomDomainBinding",
+        "dnsCutoverPerformed",
+        "maximumQueryItems",
+        "maximumLoanArchiveDocuments",
+        "maximumLoanArchiveManifestBytes",
+    ):
+        require(required_fragment in deploy_azure, f"Exact-image production gate lacks: {required_fragment}")
+    cutover = (ROOT / "scripts" / "cutover-api-domain.ps1").read_text(encoding="utf-8")
+    require("azure.api.imageScan" in cutover, "API DNS cutover must verify exact-image scan evidence.")
+    production_workflow = (ROOT / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+    for required_fragment in (
+        "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567",
+        "version: v0.72.0",
+    ):
+        require(required_fragment in production_workflow, f"Production scanner pin lacks: {required_fragment}")
+    validation_workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
+    for required_fragment in (
+        "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567",
+        "version: v0.72.0",
+        "trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1",
+        "trivy image --format cyclonedx",
+    ):
+        require(required_fragment in validation_workflow, f"Pull-request image gate lacks: {required_fragment}")
+
+
 def validate_markdown_links(path: Path) -> None:
     content = path.read_text(encoding="utf-8")
     for raw_target in re.findall(r"(?<!!)\[[^\]]+\]\(([^)]+)\)", content):
@@ -247,6 +613,14 @@ def validate_spec_kit() -> None:
         "specs/001-loan-document-platform/checklists/requirements.md",
         "specs/001-loan-document-platform/checklists/security.md",
         "specs/001-loan-document-platform/checklists/production-readiness.md",
+        "specs/002-azure-api-control-plane/spec.md",
+        "specs/002-azure-api-control-plane/plan.md",
+        "specs/002-azure-api-control-plane/research.md",
+        "specs/002-azure-api-control-plane/data-model.md",
+        "specs/002-azure-api-control-plane/quickstart.md",
+        "specs/002-azure-api-control-plane/tasks.md",
+        "specs/002-azure-api-control-plane/contracts/README.md",
+        "specs/002-azure-api-control-plane/checklists/requirements.md",
         ".claude/README.md",
         ".specify/README.md",
         ".github/copilot-instructions.md",
@@ -271,8 +645,9 @@ def validate_spec_kit() -> None:
     version_match = re.search(r"\*\*Version\*\*: (\d+)\.(\d+)\.(\d+)", constitution)
     require(version_match is not None, "Project constitution must declare a semantic version.")
     constitution_version = tuple(int(part) for part in version_match.groups())
-    require(constitution_version >= (1, 1, 0), "Project constitution predates mandatory Copilot review.")
+    require(constitution_version >= (1, 2, 0), "Project constitution predates mandatory coverage gates.")
     require("Mandatory Exact-Head Copilot Review" in constitution, "Constitution lacks Copilot governance.")
+    require("Mandatory Coverage and Browser Integration" in constitution, "Constitution lacks coverage governance.")
 
 
 def main() -> None:
@@ -301,11 +676,26 @@ def main() -> None:
         validate_workflow_actions(workflow, path)
 
     validate_copilot_review_gate()
+    validate_python_quality_gate()
+    validate_web_quality_gate()
+    validate_azure_control_plane()
 
     environment_example = load_json(ROOT / "config" / "environments" / "prod.example.json")
     require(
         environment_example["repositoryName"] == GITHUB_REPOSITORY.split("/", 1)[1],
         "Production example must use the canonical GitHub repository name.",
+    )
+    require(environment_example.get("azureMonthlyBudgetUsd", 0) >= 1, "Azure budget must be explicit.")
+    require(environment_example.get("azureContainerAppsZoneRedundant") is True, "Production Container Apps must be zone redundant.")
+    require(environment_example.get("azureApiMinReplicas", 0) >= 2, "Production API must keep at least two replicas.")
+    require(100 <= environment_example.get("maximumQueryItems", 0) <= 100_000, "Production query limit is invalid.")
+    require(
+        1 <= environment_example.get("maximumLoanArchiveDocuments", 0) <= environment_example["maximumQueryItems"],
+        "Production archive document limit is invalid.",
+    )
+    require(
+        1024 <= environment_example.get("maximumLoanArchiveManifestBytes", 0) <= 20 * 1024 * 1024,
+        "Production archive manifest limit is invalid.",
     )
     for relative_path in ("README.md", "docs/github-delivery.md"):
         content = (ROOT / relative_path).read_text(encoding="utf-8")

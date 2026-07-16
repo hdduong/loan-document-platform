@@ -64,6 +64,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def log_reference(*values: Any) -> str:
+    """Return a stable opaque reference without logging registry keys or ARNs."""
+
+    material = "\x1f".join(str(value or "") for value in values).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
 def required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -1068,10 +1075,19 @@ def transition_workflow_failure(route: dict[str, Any], header: dict[str, str]) -
 
 def artifact_prefix(route: dict[str, Any]) -> str:
     source_key = str(route["upload"]["sourceKey"])
-    marker = "/quarantine/source.pdf"
-    if not source_key.endswith(marker):
-        raise EventError("UNEXPECTED_SOURCE_KEY")
-    return source_key[: -len(marker)] + f"/artifacts/{route['runId']}"
+    current_prefix = "quarantine/"
+    current_suffix = "/source.pdf"
+    if source_key.startswith(current_prefix) and source_key.endswith(current_suffix):
+        base_key = source_key[len(current_prefix) : -len(current_suffix)]
+        return f"{base_key}/artifacts/{route['runId']}"
+
+    # Read compatibility for upload rows created before the dedicated top-level
+    # quarantine prefix. New uploads never use this legacy layout.
+    legacy_suffix = "/quarantine/source.pdf"
+    if source_key.endswith(legacy_suffix):
+        return source_key[: -len(legacy_suffix)] + f"/artifacts/{route['runId']}"
+
+    raise EventError("UNEXPECTED_SOURCE_KEY")
 
 
 def put_versioned_object(bucket: str, key: str, body: bytes, content_type: str) -> dict[str, str]:
@@ -1490,7 +1506,7 @@ def move_active_marker(item: dict[str, Any], next_sort_key: str | None) -> bool:
     sk = item.get("SK")
     current_sort_key = item.get("GSI2SK")
     if not pk or not sk or not current_sort_key:
-        LOGGER.error("active_execution_marker_key_invalid pk=%s sk=%s", pk, sk)
+        LOGGER.error("active_execution_marker_key_invalid marker_ref=%s", log_reference(pk, sk))
         return False
     values = {
         ":active": ACTIVE_EXECUTION_PARTITION,
@@ -1511,10 +1527,10 @@ def move_active_marker(item: dict[str, Any], next_sort_key: str | None) -> bool:
         return True
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-            LOGGER.exception("active_execution_marker_move_failed pk=%s sk=%s", pk, sk)
+            LOGGER.exception("active_execution_marker_move_failed marker_ref=%s", log_reference(pk, sk))
         return False
     except Exception:  # noqa: BLE001 - a marker maintenance error must not abort the bounded batch
-        LOGGER.exception("active_execution_marker_move_failed pk=%s sk=%s", pk, sk)
+        LOGGER.exception("active_execution_marker_move_failed marker_ref=%s", log_reference(pk, sk))
         return False
 
 
@@ -1584,7 +1600,10 @@ def reconcile_watchdog() -> dict[str, Any]:
     for item in response.get("Items", []):
         execution_arn = str(item.get("executionArn") or "")
         if item.get("entityType") != "IDP_WORKFLOW" or not execution_arn:
-            LOGGER.error("invalid_active_execution_marker pk=%s sk=%s", item.get("PK"), item.get("SK"))
+            LOGGER.error(
+                "invalid_active_execution_marker marker_ref=%s",
+                log_reference(item.get("PK"), item.get("SK")),
+            )
             summary["errors"] += 1
             if move_active_marker(item, None):
                 summary["invalidRemoved"] += 1
@@ -1598,7 +1617,11 @@ def reconcile_watchdog() -> dict[str, Any]:
                     summary["rescheduled"] += 1
                 continue
             if status not in {"SUCCEEDED", *WORKFLOW_FAILURE_STATUSES}:
-                LOGGER.warning("watchdog_execution_not_terminal execution_arn=%s status=%s", execution_arn, status)
+                LOGGER.warning(
+                    "watchdog_execution_not_terminal execution_ref=%s status=%s",
+                    log_reference(execution_arn),
+                    status,
+                )
                 summary["running"] += 1
                 if reschedule_active_marker(item, execution_arn, observed_at):
                     summary["rescheduled"] += 1
@@ -1606,7 +1629,7 @@ def reconcile_watchdog() -> dict[str, Any]:
             process_workflow_event(described_execution_event(description, observed_at))
             summary["reconciled"] += 1
         except Exception:  # noqa: BLE001 - one poisoned execution must not starve the bounded batch
-            LOGGER.exception("watchdog_reconciliation_failed execution_arn=%s", execution_arn)
+            LOGGER.exception("watchdog_reconciliation_failed execution_ref=%s", log_reference(execution_arn))
             summary["errors"] += 1
             if reschedule_active_marker(item, execution_arn, observed_at):
                 summary["rescheduled"] += 1

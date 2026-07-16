@@ -31,7 +31,24 @@ authorization MUST enforce both the declared OAuth scope and matching app role.
 Uploads go directly to versioned S3 quarantine storage and only an exact,
 checksum-verified, malware-clean version may enter IDP processing.
 
-### IV. Deterministic Document Processing and Provenance
+### IV. Azure Control Plane and Federated AWS Data Plane
+
+The Entra-protected Azure API MUST be the sole public loan/document domain API.
+The browser MUST NOT call a custom AWS Loan API, AppSync, DynamoDB, Lambda,
+Step Functions, or an IDP Jobs endpoint. The retained headless AWS data plane
+MAY expose only short-lived, Azure-authorized S3 byte-transfer grants to the
+browser. DynamoDB remains the single mutable registry shared by Azure and the
+private AWS processors until a separately specified migration replaces it.
+
+The Azure API MUST use a dedicated managed workload identity to obtain
+short-lived AWS STS credentials through an OIDC role trust restricted to the
+exact Entra tenant issuer, dedicated federation audience, and managed-identity
+subject. End-user bearer tokens MUST never be forwarded to AWS. Static AWS
+keys, Entra client secrets, Cognito service users, audience-only trust, and
+fallback credentials are prohibited. Runtime AWS permissions MUST name only
+the required table/indexes, object prefixes, KMS key use, and processor action.
+
+### V. Deterministic Document Processing and Provenance
 
 The reviewed `cd-full-v1` configuration is the extraction accuracy baseline and
 MUST remain immutable unless regression evidence justifies a new version. The
@@ -41,26 +58,28 @@ Disclosure pages. Selection, input versions, configuration versions/digests,
 model evidence, execution ARNs, and output artifacts MUST be recorded. Missing,
 ambiguous, or contradictory evidence fails closed to a review/hold state.
 
-### V. Testable, Reviewable Changes
+### VI. Testable, Reviewable Changes
 
 Each prioritized user story MUST have an independent acceptance test. Contract,
 authorization, idempotency, archive sequencing, exact-version processing, and
 failure-reconciliation changes require automated regression coverage. All
 changes MUST pass repository invariants, Python lint/compile, unit tests,
-OpenAPI validation, PowerShell parsing, and CloudFormation lint before merge.
-Generated or third-party assets MUST be pinned and their provenance retained.
+coverage gates, applicable browser integration tests, OpenAPI validation,
+PowerShell parsing, and CloudFormation lint before merge. Generated or
+third-party assets MUST be pinned and their provenance retained.
 
-### VI. Scripted, Observable, and Cost-Aware Operations
+### VII. Scripted, Observable, and Cost-Aware Operations
 
 Production infrastructure and identity configuration MUST be reproducible from
-reviewed scripts and infrastructure as code. GitHub deploys with short-lived
-OIDC credentials restricted to the exact repository and environment; long-lived
-AWS keys are prohibited. Production changes require the protected `main` branch,
-the `prod` environment reviewer, observable failure paths, bounded retries/DLQs,
-execution reconciliation, backups, and cost alerts. The USD 100 monthly budget
-is an alerting guardrail, not a hard service stop.
+reviewed scripts and infrastructure as code. GitHub deploys to Azure and AWS
+with separate short-lived OIDC credentials restricted to the exact repository
+and environment; long-lived cloud keys and client secrets are prohibited.
+Production changes require the protected `main` branch, the `prod` environment
+reviewer, observable failure paths, bounded retries/DLQs, execution
+reconciliation, backups, and cost alerts. The USD 100 AWS monthly budget is an
+alerting guardrail, not a hard service stop.
 
-### VII. Mandatory Exact-Head Copilot Review
+### VIII. Mandatory Exact-Head Copilot Review
 
 Every pull request MUST request GitHub Copilot code review, including drafts,
 and MUST request a new review after every pushed commit. Merge MUST remain
@@ -73,13 +92,41 @@ review-wait-fix cycle. Copilot is advisory and never substitutes for automated
 validation, security review, or human judgment. Quota exhaustion, timeout, or
 service failure MUST fail closed and MUST NOT be treated as a completed review.
 
+### IX. Mandatory Coverage and Browser Integration
+
+Every hand-authored production Python file under `services/` MUST independently
+maintain at least 80% line coverage, and the combined service suite MUST remain
+at or above the same floor. Repository-wide aggregation MUST NOT conceal an
+individual file below the threshold. Every hand-authored React/TypeScript
+production file MUST independently maintain at least 80% statements, lines,
+functions, and branches. Generated OpenAPI clients, type-only declarations,
+tests, pinned third-party code, and declarative configuration/IaC MAY be
+excluded only through narrow reviewed configuration; their generation drift,
+contracts, schemas, or syntax MUST remain separately validated. Thresholds,
+source inclusion, or exclusions MUST NOT be weakened merely to make a change
+pass.
+
+Browser-facing changes MUST add or update Playwright integration coverage for
+each affected journey. Pull-request Playwright tests MUST run against the
+production build with deterministic synthetic identity, API, and storage
+behavior, deny unexpected network access, and contain no reusable credential,
+real document, or customer data. Critical hosted Entra/API/S3 journeys require
+an environment-gated synthetic Playwright smoke suite before production
+acceptance. Browser tests supplement rather than replace unit coverage,
+authorization tests, accessibility review, or live operational acceptance.
+
 ## Technology and Compliance Constraints
 
-- AWS workload region is `us-west-2`; CloudFront-scoped resources use the AWS
-  regions required by that service.
+- AWS data-processing region is `us-west-2`; the Azure region is an explicit
+  per-environment deployment input.
 - Microsoft Entra ID is the identity provider for SPA SSO and OAuth API access.
+- Azure Container Apps hosts the product API and Azure Static Web Apps hosts the
+  React SPA; custom HTTPS hostnames and certificates are deployment inputs.
 - AWS IDP is pinned by `vendor/idp.lock.json`; Spec Kit is pinned by
   `vendor/spec-kit.lock.json`.
+- The pinned IDP deployment mode is headless. AppSync and the optional private
+  Jobs REST API are not runtime dependencies unless a later specification
+  deliberately changes the deployment mode and trust boundary.
 - Customer data is encrypted in transit and at rest, retained only by explicit
   lifecycle policy, and excluded from public repositories and CI artifacts.
 - The React client consumes generated OpenAPI types and runtime configuration;
@@ -102,10 +149,12 @@ service failure MUST fail closed and MUST NOT be treated as a completed review.
    requested for the exact head SHA, wait for its review, address every sound
    comment, push fixes, and repeat until the latest head is reviewed with no
    unresolved actionable feedback.
-6. Merge only after the required `validate` and `copilot-review` checks pass and
-   every review conversation is resolved.
-7. Deployment is a separate reviewed action. Passing CI does not imply that AWS
-   or Entra resources have been provisioned or operationally accepted.
+6. Merge only after per-file coverage, applicable Playwright integration,
+   repository validation, and the required `validate` and `copilot-review`
+   checks pass, and every review conversation is resolved.
+7. Deployment is a separate reviewed action. Passing CI does not imply that
+   Azure, AWS, Entra, DNS, or certificate resources have been provisioned or
+   operationally accepted.
 
 ## Governance
 
@@ -117,4 +166,4 @@ Every plan MUST include a constitution check, and every review MUST reject
 unjustified violations. `CLAUDE.md` supplies agent-specific operating context
 but cannot weaken this constitution.
 
-**Version**: 1.1.0 | **Ratified**: 2026-07-14 | **Last Amended**: 2026-07-14
+**Version**: 1.3.0 | **Ratified**: 2026-07-14 | **Last Amended**: 2026-07-16

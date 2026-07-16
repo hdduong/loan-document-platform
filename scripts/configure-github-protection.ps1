@@ -90,7 +90,11 @@ if ($PSCmdlet.ShouldProcess($repository, 'Harden repository, Actions, branch, Co
     Invoke-GitHubRequest -Method PUT -Path "repos/$repository/actions/permissions/selected-actions" -Body @{
         github_owned_allowed = $true
         verified_allowed = $false
-        patterns_allowed = @('aws-actions/*')
+        patterns_allowed = @(
+            'aws-actions/*',
+            'azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5',
+            'aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567'
+        )
     } | Out-Null
 
     Invoke-GitHubRequest -Method PUT -Path "repos/$repository/environments/$DeploymentEnvironment" -Body @{

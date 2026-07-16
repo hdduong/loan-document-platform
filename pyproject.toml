@@ -2,6 +2,18 @@
 testpaths = ["tests"]
 addopts = "-ra"
 
+[tool.coverage.run]
+branch = true
+source = ["services"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.coverage.json]
+output = "coverage.json"
+pretty_print = true
+
 [tool.ruff]
 target-version = "py313"
 line-length = 110

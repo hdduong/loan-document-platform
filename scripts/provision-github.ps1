@@ -2,8 +2,7 @@
 param(
     [Parameter(Mandatory)][string]$EnvironmentFile,
     [switch]$CreateRepository,
-    [switch]$ConfigureOrigin,
-    [switch]$GenerateInitialOriginVerifySecret
+    [switch]$ConfigureOrigin
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,8 +59,9 @@ $parameters = @(
     "GitHubRepository=$($config.repositoryName)",
     "GitHubEnvironment=$($config.githubEnvironment)",
     "EnvironmentName=$($config.environment)",
+    "PlatformStackName=$($config.platformStackName)",
     "IdpStackName=$($config.idpStackName)",
-    "Route53HostedZoneId=$($config.route53HostedZoneId)"
+    "EntraTenantId=$($config.entraTenantId)"
 )
 if ($providerArn) { $parameters += "ExistingGitHubOidcProviderArn=$providerArn" }
 
@@ -80,7 +80,19 @@ if ($PSCmdlet.ShouldProcess($config.bootstrapStackName, 'Deploy GitHub OIDC boot
 }
 
 $outputs = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.bootstrapStackName
-if (-not $outputs.GitHubDeploymentRoleArn -or -not $outputs.CloudFormationExecutionRoleArn -or -not $outputs.ArtifactBucketName) {
+foreach ($requiredOutput in @(
+    'GitHubDeploymentRoleArn',
+    'PlatformCloudFormationExecutionRoleArn',
+    'IdpCloudFormationExecutionRoleArn',
+    'PlatformRolePermissionsBoundaryArn',
+    'IdpRolePermissionsBoundaryArn',
+    'ArtifactBucketName'
+)) {
+    if ([string]::IsNullOrWhiteSpace([string]$outputs[$requiredOutput])) {
+        throw "Bootstrap stack output '$requiredOutput' is missing."
+    }
+}
+if (-not $outputs.ArtifactKeyArn) {
     throw 'Bootstrap stack outputs are incomplete.'
 }
 
@@ -131,35 +143,16 @@ if ($PSCmdlet.ShouldProcess("$repository environment $($config.githubEnvironment
         AWS_REGION = $config.awsRegion
         AWS_ACCOUNT_ID = $config.awsAccountId
         AWS_DEPLOY_ROLE_ARN = $outputs.GitHubDeploymentRoleArn
-        AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN = $outputs.CloudFormationExecutionRoleArn
+        AWS_PLATFORM_CLOUDFORMATION_EXECUTION_ROLE_ARN = $outputs.PlatformCloudFormationExecutionRoleArn
+        AWS_IDP_CLOUDFORMATION_EXECUTION_ROLE_ARN = $outputs.IdpCloudFormationExecutionRoleArn
+        AWS_PLATFORM_ROLE_PERMISSIONS_BOUNDARY_ARN = $outputs.PlatformRolePermissionsBoundaryArn
+        AWS_IDP_ROLE_PERMISSIONS_BOUNDARY_ARN = $outputs.IdpRolePermissionsBoundaryArn
         AWS_ARTIFACT_BUCKET = $outputs.ArtifactBucketName
         DEPLOYMENT_CONFIG_JSON = $environmentJson
     }
     foreach ($entry in $variables.GetEnumerator()) {
         $entry.Value | & gh variable set $entry.Key --repo $repository --env $config.githubEnvironment
         if ($LASTEXITCODE -ne 0) { throw "Failed to set GitHub environment variable '$($entry.Key)'." }
-    }
-}
-
-if ($GenerateInitialOriginVerifySecret) {
-    $existingSecretNames = & gh secret list --repo $repository --env $config.githubEnvironment --json name |
-        ConvertFrom-Json | ForEach-Object { $_.name }
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to inspect GitHub environment secrets.' }
-    if ($existingSecretNames -contains 'LOAN_API_ORIGIN_VERIFY_SECRET') {
-        throw 'LOAN_API_ORIGIN_VERIFY_SECRET already exists. Initial provisioning refuses to rotate it; use a coordinated API/edge rotation workflow.'
-    }
-    if ($PSCmdlet.ShouldProcess("$repository environment $($config.githubEnvironment)", 'Generate initial origin-verification secret')) {
-        $secretBytes = [byte[]]::new(48)
-        try {
-            [System.Security.Cryptography.RandomNumberGenerator]::Fill($secretBytes)
-            $originSecret = [Convert]::ToBase64String($secretBytes)
-            $originSecret | & gh secret set LOAN_API_ORIGIN_VERIFY_SECRET --repo $repository --env $config.githubEnvironment
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to store the origin-verification secret in the GitHub environment.' }
-        } finally {
-            [Array]::Clear($secretBytes, 0, $secretBytes.Length)
-            $originSecret = $null
-        }
-        Write-Host 'Generated the initial origin-verification secret without printing or writing it locally.'
     }
 }
 

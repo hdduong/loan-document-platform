@@ -12,3 +12,8 @@
 ## Validation
 
 <!-- List tests, contract checks, and synthetic validation performed. -->
+
+- [ ] Every affected production Python file remains at least 80% line-covered individually and overall.
+- [ ] Every affected React/TypeScript production file remains at least 80% covered per file for statements, lines, functions, and branches, or no UI source changed.
+- [ ] Playwright integration tests were added or updated for affected browser journeys and passed, or no browser behavior changed.
+- [ ] Coverage thresholds, source inclusion, and exclusions were not weakened.
