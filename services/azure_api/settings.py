@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
+from ipaddress import ip_address
 from typing import Mapping
 from urllib.parse import urlparse
 from uuid import UUID
@@ -97,8 +98,17 @@ def _origins(environ: Mapping[str, str], environment: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(normalized_origins))
 
 
-def _api_hostname(environ: Mapping[str, str]) -> str:
+def _api_hostname(environ: Mapping[str, str], environment: str) -> str:
     hostname = _required(environ, "API_HOST_NAME")
+    if environment == "prod":
+        try:
+            ip_address(hostname)
+        except ValueError:
+            pass
+        else:
+            raise ConfigurationError("API_HOST_NAME must be a fully-qualified DNS hostname in production")
+        if "." not in hostname or hostname == "localhost" or hostname.endswith(".localhost"):
+            raise ConfigurationError("API_HOST_NAME must be a fully-qualified DNS hostname in production")
     if (
         hostname != hostname.lower()
         or len(hostname) > 253
@@ -186,7 +196,7 @@ class Settings:
             denied_client_ids=denied_clients,
             require_user_roles=require_user_roles,
             allowed_origins=_origins(values, environment),
-            api_host_name=_api_hostname(values),
+            api_host_name=_api_hostname(values, environment),
             azure_managed_identity_client_id=_guid(values, "AZURE_MANAGED_IDENTITY_CLIENT_ID"),
             aws_federation_audience=federation_audience,
             aws_federation_subject=_guid(values, "AWS_FEDERATION_SUBJECT"),

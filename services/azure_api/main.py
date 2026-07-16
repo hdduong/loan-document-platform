@@ -128,12 +128,12 @@ async def _bounded_body(request: Request, maximum_bytes: int) -> bytes:
         if declared_length < 0:
             raise RequestBodyProblem(400, "INVALID_CONTENT_LENGTH", "Content-Length is invalid")
         if declared_length > maximum_bytes:
-            raise RequestBodyProblem(413, "REQUEST_TOO_LARGE", "Request metadata is too large")
+            raise RequestBodyProblem(413, "REQUEST_TOO_LARGE", "Request body is too large")
 
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > maximum_bytes:
-            raise RequestBodyProblem(413, "REQUEST_TOO_LARGE", "Request metadata is too large")
+            raise RequestBodyProblem(413, "REQUEST_TOO_LARGE", "Request body is too large")
         body.extend(chunk)
     if declared_length is not None and len(body) != declared_length:
         raise RequestBodyProblem(400, "CONTENT_LENGTH_MISMATCH", "Content-Length does not match the body")

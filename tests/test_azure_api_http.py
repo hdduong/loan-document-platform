@@ -609,8 +609,10 @@ def test_request_body_limits_and_utf8_validation_happen_before_aws() -> None:
         )
 
     assert declared.json()["code"] == "REQUEST_TOO_LARGE"
+    assert declared.json()["detail"] == "Request body is too large"
     assert actual.json()["code"] == "REQUEST_TOO_LARGE"
     assert chunked.json()["code"] == "REQUEST_TOO_LARGE"
+    assert chunked.json()["detail"] == "Request body is too large"
     assert malformed.json()["code"] == "INVALID_CONTENT_LENGTH"
     assert mismatch.json()["code"] == "CONTENT_LENGTH_MISMATCH"
     assert invalid.json()["code"] == "INVALID_BODY"

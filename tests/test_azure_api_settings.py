@@ -77,6 +77,23 @@ def test_non_production_allows_local_http_and_explicit_overrides() -> None:
     assert settings.jwks_timeout_seconds == 5
 
 
+@pytest.mark.parametrize("hostname", ["api", "localhost", "api.localhost", "127.0.0.1", "192.0.2.10", "::1"])
+def test_production_api_hostname_requires_fully_qualified_dns_name(hostname: str) -> None:
+    values = environment()
+    values["API_HOST_NAME"] = hostname
+
+    with pytest.raises(ConfigurationError, match="fully-qualified DNS hostname in production"):
+        Settings.from_env(values)
+
+
+@pytest.mark.parametrize("hostname", ["localhost", "api.localhost", "127.0.0.1"])
+def test_non_production_api_hostname_preserves_local_development_hosts(hostname: str) -> None:
+    values = environment()
+    values.update({"ENVIRONMENT_NAME": "dev", "API_HOST_NAME": hostname})
+
+    assert Settings.from_env(values).api_host_name == hostname
+
+
 def test_origins_normalize_default_ports_and_preserve_non_default_ports() -> None:
     values = environment()
     values.update(
