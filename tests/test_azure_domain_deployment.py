@@ -85,6 +85,26 @@ def test_powershell_environment_config_requires_canonical_api_hostname(
     assert "lowercase without a trailing dot" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("azureApiMaxReplicas", 301),
+        ("azureApiConcurrentRequestsPerReplica", 1001),
+    ],
+)
+def test_powershell_scaling_error_names_every_enforced_bound(
+    tmp_path: Path, field: str, value: int
+) -> None:
+    values = environment_config()
+    values[field] = value
+
+    completed = read_environment_config(tmp_path, values)
+
+    assert completed.returncode != 0
+    assert "azureApiMaxReplicas <= 300" in completed.stderr
+    assert "azureApiConcurrentRequestsPerReplica <= 1000" in completed.stderr
+
+
 def test_bicep_and_runtime_share_the_strict_environment_enum() -> None:
     bicep = (ROOT / "infra" / "azure" / "main.bicep").read_text(encoding="utf-8")
     settings = (ROOT / "services" / "azure_api" / "settings.py").read_text(encoding="utf-8")
