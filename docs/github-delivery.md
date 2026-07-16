@@ -66,6 +66,10 @@ required CODEOWNER review.
 The active `Mandatory Copilot review` ruleset requests Copilot review for draft
 pull requests and again after every push. The `copilot-review` workflow waits for
 a Copilot `COMMENTED` review whose `commit_id` matches the current head.
+If a pull request is outside that ruleset's target, including a stacked pull
+request, manually request the `copilot-pull-request-reviewer[bot]` reviewer for
+the current head. An `@copilot` conversation command starts a coding-agent task;
+it does not satisfy the pull-request review requirement.
 
 Copilot is advisory and never counts as an approving reviewer. Every actionable
 comment consistent with the constitution must be fixed and tested; an

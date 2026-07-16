@@ -155,7 +155,7 @@ description: "Implementation tasks for moving the product API to Azure while ret
 - [x] T047 Mark the historical `001` feature as superseded without rewriting its completed record, and link migration decisions from `specs/001-loan-document-platform/spec.md` and `specs/README.md`
 - [ ] T048 Add and run a sanitized synthetic API load/smoke check for the two-second p95 upload-initialization/status targets in `scripts/test-azure-api-load.ps1`, then run repository validation, Ruff, compileall, all pytest suites, per-file/aggregate coverage, OpenAPI validation, PowerShell parsing, cfn-lint, Bicep build, and container build using `specs/002-azure-api-control-plane/quickstart.md`
 - [x] T049 Update every task checkbox truthfully, record only environment-gated live acceptance as pending in `specs/002-azure-api-control-plane/tasks.md` and `specs/002-azure-api-control-plane/checklists/production-readiness.md`
-- [ ] T050 Push a reviewed branch, request `@copilot` for the exact head, wait for review/check completion, address every sound comment, re-run validation, and repeat after any new push according to `.specify/memory/constitution.md`
+- [x] T050 Push a reviewed branch, request the `copilot-pull-request-reviewer[bot]` reviewer for the exact head, wait for review/check completion, address every sound comment, re-run validation, and repeat after any new push according to `.specify/memory/constitution.md`
 
 ---
 
