@@ -15,7 +15,7 @@ $commands = @(
     @{ Name = 'aws'; Package = 'Amazon.AWSCLI'; Hint = 'Install AWS CLI v2.' },
     @{ Name = 'sam'; Package = 'Amazon.SAM-CLI'; Hint = 'Install AWS SAM CLI.' },
     @{ Name = 'az'; Package = 'Microsoft.AzureCLI'; Hint = 'Install Azure CLI.' },
-    @{ Name = 'python'; Package = 'Python.Python.3.13'; Hint = 'Install Python 3.12 or later.' },
+    @{ Name = 'python'; Package = 'Python.Python.3.13'; Hint = 'Install Python 3.13.' },
     @{ Name = 'node'; Package = 'OpenJS.NodeJS.LTS'; Hint = 'Install Node.js 22 or later.' },
     @{ Name = 'trivy'; Package = 'AquaSecurity.Trivy'; Version = $requiredTrivyVersion; Hint = 'Install the pinned Trivy scanner for the immutable production image gate.' }
 )

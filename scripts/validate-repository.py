@@ -285,10 +285,12 @@ def validate_azure_control_plane() -> None:
         "azure-identity==1.25.3",
         "boto3==1.43.49",
         "fastapi==0.139.1",
+        "httpx==0.28.1",
         "PyJWT[crypto]==2.13.0",
         "starlette==1.3.1",
     ):
         require(required_pin in development_requirements, f"Development/runtime pin is inconsistent: {required_pin}")
+    require("httpx2" not in development_requirements, "The unrelated httpx2 package must not replace httpx.")
 
     for retired_path in ("scripts/deploy-edge.ps1", "infra/edge/template.yaml"):
         require(

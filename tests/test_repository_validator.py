@@ -173,6 +173,7 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "azure-identity==1.25.3\n"
             "boto3==1.43.49\n"
             "fastapi==0.139.1\n"
+            "httpx==0.28.1\n"
             "PyJWT[crypto]==2.13.0\n"
             "starlette==1.3.1\n"
         ),

@@ -853,3 +853,16 @@ def test_stream_handler_returns_only_failed_sequence_identifiers(
     assert result == {"batchItemFailures": [{"itemIdentifier": "sequence-17"}]}
     assert "sensitive-closing-disclosure.pdf" not in caplog.text
     assert "synthetic retry" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [],
+        [{"eventSource": "aws:s3"}],
+        [{"eventSource": "aws:dynamodb"}, {"eventSource": "aws:s3"}],
+    ],
+)
+def test_handler_does_not_misclassify_non_stream_record_envelopes(records: list[dict[str, str]]) -> None:
+    with pytest.raises(processor.EventError, match="EVENT_DETAIL_REQUIRED"):
+        processor.handler({"Records": records}, None)

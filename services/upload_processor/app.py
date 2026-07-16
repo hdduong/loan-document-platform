@@ -732,7 +732,12 @@ def reconcile(upload: dict[str, Any], requested_version_id: str) -> dict[str, An
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    if isinstance(event.get("Records"), list):
+    records = event.get("Records")
+    if (
+        isinstance(records, list)
+        and bool(records)
+        and all(isinstance(record, dict) and record.get("eventSource") == "aws:dynamodb" for record in records)
+    ):
         return handle_stream_event(event)
     normalized = event_object(event)
     upload = find_upload(normalized["bucket"], normalized["key"])
