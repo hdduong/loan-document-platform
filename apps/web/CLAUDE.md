@@ -2,6 +2,8 @@
 
 Implement the UI in this directory only. Treat `../../contracts/openapi/loan-api.yaml` and `../../docs/ui-handoff.md` as authoritative. Generate the TypeScript API client from OpenAPI; do not hand-maintain duplicate DTOs or endpoint strings.
 
+Before changing UI behavior, also read `../../.specify/memory/constitution.md` and the active feature's `spec.md`, `plan.md`, and `tasks.md`; resolve the active feature through `../../.specify/feature.json`. Implement only tasks assigned to the UI and keep the feature artifacts aligned with the authoritative OpenAPI contract and UI handoff. If a feature artifact conflicts with a production security rule or canonical contract, stop that implementation path until the artifacts and canonical source are deliberately reconciled.
+
 Required stack: React, TypeScript, Vite, React Router, MSAL Browser/React, TanStack Query, React Hook Form, Zod, Vitest, Testing Library, MSW, Playwright, and axe.
 
 Non-negotiable security rules:

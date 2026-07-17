@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/github/spec-kit",
+  "version": "0.12.15",
+  "tag": "v0.12.15",
+  "commit": "7b91c1eda46e1107a53831cd3f14f608b4b7bad0",
+  "integration": "claude",
+  "script": "ps",
+  "aiSkills": true
+}

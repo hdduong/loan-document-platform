@@ -1,0 +1,51 @@
+name: Copilot Review Gate
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: copilot-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  copilot-review:
+    name: copilot-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for Copilot to review the exact pull-request head
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          readonly reviewer='copilot-pull-request-reviewer[bot]'
+          readonly deadline=$((SECONDS + 900))
+
+          while (( SECONDS < deadline )); do
+            review_ids="$(
+              gh api --paginate \
+                -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+                --jq ".[] | select(.user.login == \"${reviewer}\" and .state == \"COMMENTED\" and .commit_id == \"${HEAD_SHA}\") | .id"
+            )"
+
+            if [[ -n "${review_ids}" ]]; then
+              echo "Copilot reviewed pull request ${PR_NUMBER} at ${HEAD_SHA}."
+              exit 0
+            fi
+
+            echo "Waiting for Copilot review of ${HEAD_SHA}..."
+            sleep 15
+          done
+
+          echo "::error::Copilot did not review the exact head ${HEAD_SHA} within 15 minutes. Check review assignment, entitlement, quota, or service status, then rerun this check."
+          exit 1

@@ -3,7 +3,7 @@
   "awsRegion": "us-west-2",
   "awsProfile": "REPLACE_WITH_IAM_IDENTITY_CENTER_PROFILE",
   "awsAccountId": "REPLACE_WITH_12_DIGIT_ACCOUNT_ID",
-  "repositoryName": "loan-document-platform",
+  "repositoryName": "aws-idp-custom-platform",
   "githubOwner": "hdduong",
   "githubRepositoryVisibility": "public",
   "githubDeploymentReviewer": "hdduong",

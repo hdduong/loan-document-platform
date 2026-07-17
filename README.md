@@ -1,6 +1,6 @@
 # Loan Document Platform
 
-[![Validate](https://github.com/hdduong/loan-document-platform/actions/workflows/validate.yml/badge.svg)](https://github.com/hdduong/loan-document-platform/actions/workflows/validate.yml)
+[![Validate](https://github.com/hdduong/aws-idp-custom-platform/actions/workflows/validate.yml/badge.svg)](https://github.com/hdduong/aws-idp-custom-platform/actions/workflows/validate.yml)
 
 Production-oriented monorepo for securely ingesting loan packages, selecting the winning Closing Disclosure, extracting its data, and preserving immutable loan/document archives.
 
@@ -43,7 +43,13 @@ Archive is a read-only logical snapshot, not deletion. Permanent purge is a sepa
 
 No script requests or prints AWS access keys, Entra secrets, certificate private keys, PDFs, OCR text, or extracted data.
 
-The repository is public to use free standard GitHub-hosted Actions and public-repository deployment protection. Public visibility does not make the mortgage data public: real documents and derived values are prohibited from source control. No open-source license is granted by default; see `LICENSE`.
+The repository is public to use free standard GitHub-hosted Actions and public-repository deployment protection. Public visibility does not make the mortgage data public: real documents and derived values are prohibited from source control. No open-source license is granted for project-owned code; see `LICENSE`. Generated third-party assets retain the licenses listed in [third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Spec-driven development
+
+This brownfield baseline follows GitHub Spec Kit v0.12.15 with its native Claude Code skills and PowerShell workflow. Durable rules live in the [project constitution](.specify/memory/constitution.md); product intent, design, and reality-based tasks live in the [baseline feature packet](specs/001-loan-document-platform/spec.md). The OpenAPI contract remains authoritative for the HTTP wire format.
+
+In Claude Code, restart once after cloning so the committed `.claude/skills` directory is discovered, then use `/speckit-specify`, `/speckit-clarify`, `/speckit-plan`, `/speckit-tasks`, `/speckit-analyze`, and `/speckit-implement`. See the [project workflow](docs/spec-driven-development.md) before creating or changing a feature. Upstream scaffold provenance is pinned in `vendor/spec-kit.lock.json` and refreshed only through `scripts/sync-spec-kit.ps1`.
 
 ## Documentation
 
@@ -52,4 +58,6 @@ The repository is public to use free standard GitHub-hosted Actions and public-r
 - [Security and certificates](docs/security.md)
 - [Operations runbook](docs/runbook.md)
 - [GitHub delivery](docs/github-delivery.md)
+- [Spec-driven development](docs/spec-driven-development.md)
+- [Baseline feature specification](specs/001-loan-document-platform/spec.md)
 - [OpenAPI contract](contracts/openapi/loan-api.yaml)

@@ -58,6 +58,14 @@ entra-state*.json
 deployment-outputs*.json
 /.local/
 
+# Claude Code and Spec Kit local state (commit .claude/skills and .specify assets)
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/projects/
+.claude/todos/
+.claude/.credentials*
+.specify/workflows/runs/
+
 # Editor / OS
 .idea/
 .vscode/

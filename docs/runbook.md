@@ -4,6 +4,7 @@
 
 - AWS account with administrator rights for initial bootstrap; ongoing delivery uses GitHub OIDC and a dedicated CloudFormation execution role.
 - GitHub account with permission to create the public repository and GitHub Actions workflows.
+- GitHub Copilot code review entitlement and available premium-request quota for pull-request authors; review failure blocks merge.
 - IAM Identity Center AWS CLI profile with MFA. Do not use long-lived access keys.
 - Route 53 public hosted zone for the selected company domain.
 - Microsoft Entra tenant with Application/Cloud Application Administrator rights and permission to grant tenant consent.
@@ -15,7 +16,7 @@
 1. Create an ignored `config/environments/prod.json` from the example.
 2. Run `scripts/bootstrap.ps1 -InstallMissing`, then `scripts/bootstrap.ps1 -EnvironmentFile ...` to verify the selected AWS account and Entra tenant.
 3. Run `scripts/provision-github.ps1 -EnvironmentFile ... -CreateRepository -GenerateInitialOriginVerifySecret` to create/configure the public GitHub repository, AWS OIDC bootstrap stack, non-secret variables, and initial protected origin secret. Review its trust policy before publishing code.
-4. Commit the reviewed scaffold and push `main` to GitHub. Configure branch protection and the `prod` GitHub environment before enabling production deployment.
+4. Commit the reviewed scaffold and push `main` to GitHub. Run `scripts/configure-github-protection.ps1` to configure branch protection, automatic draft/every-push Copilot review, the exact-head review gate, and the `prod` GitHub environment before enabling production deployment.
 5. Run `scripts/provision-entra.ps1 -EnvironmentFile ...`, then `scripts/sync-github-entra.ps1 -EnvironmentFile ...`. Only non-secret tenant/app IDs are synchronized; no certificate or client secret is uploaded.
 6. Deploy the platform stack once with its placeholder IDP bucket. This creates the postprocessor ARN.
 7. Deploy the pinned headless IDP stack with the postprocessor ARN.
@@ -32,6 +33,7 @@ The GitHub deployment workflow is deliberately manual (`workflow_dispatch`) for 
 ## Production release gates
 
 - Unit, API contract, IaC lint, dependency, secret, and synthetic integration tests pass.
+- Copilot has submitted a review for the exact current pull-request head, all sound findings are fixed, rejected suggestions have evidence, any feedback push was re-reviewed, and every conversation is resolved.
 - No PDFs, private keys, `.env`, OCR, or extraction output are present in Git.
 - The same immutable build artifacts are promoted; production is not rebuilt.
 - IDP configuration digests and upstream commit match the release manifest.

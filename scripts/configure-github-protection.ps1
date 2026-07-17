@@ -50,9 +50,9 @@ function Invoke-GitHubRequest {
 
     if ($PSBoundParameters.ContainsKey('Body')) {
         $json = $Body | ConvertTo-Json -Depth 20 -Compress
-        $output = $json | & gh api --method $Method $Path --input -
+        $output = $json | & gh api -H 'X-GitHub-Api-Version: 2026-03-10' --method $Method $Path --input -
     } else {
-        $output = & gh api --method $Method $Path
+        $output = & gh api -H 'X-GitHub-Api-Version: 2026-03-10' --method $Method $Path
     }
     if ($LASTEXITCODE -ne 0) { throw "GitHub API request failed: $Method $Path" }
     return $output
@@ -66,7 +66,7 @@ if ($repositoryState.visibility -cne 'public') {
 Invoke-GitHubRequest -Method GET -Path "repos/$repository/branches/$DefaultBranch" | Out-Null
 $reviewer = Invoke-GitHubRequest -Method GET -Path "users/$DeploymentReviewer" | ConvertFrom-Json
 
-if ($PSCmdlet.ShouldProcess($repository, 'Harden repository, Actions, branch, security reporting, and deployment environment settings')) {
+if ($PSCmdlet.ShouldProcess($repository, 'Harden repository, Actions, branch, Copilot review, security reporting, and deployment environment settings')) {
     Invoke-GitHubRequest -Method PATCH -Path "repos/$repository" -Body @{
         allow_merge_commit = $false
         allow_rebase_merge = $false
@@ -120,10 +120,46 @@ if ($PSCmdlet.ShouldProcess($repository, 'Harden repository, Actions, branch, se
         } | Out-Null
     }
 
+    $copilotRulesetName = 'Mandatory Copilot review'
+    $copilotRuleset = @{
+        name = $copilotRulesetName
+        target = 'branch'
+        enforcement = 'active'
+        bypass_actors = @()
+        conditions = @{
+            ref_name = @{
+                include = @("refs/heads/$DefaultBranch")
+                exclude = @()
+            }
+        }
+        rules = @(
+            @{
+                type = 'copilot_code_review'
+                parameters = @{
+                    review_draft_pull_requests = $true
+                    review_on_push = $true
+                }
+            }
+        )
+    }
+    $repositoryRulesets = @(
+        Invoke-GitHubRequest -Method GET -Path "repos/$repository/rulesets" |
+            ConvertFrom-Json
+    )
+    $matchingRulesets = @($repositoryRulesets | Where-Object { $_.name -ceq $copilotRulesetName })
+    if ($matchingRulesets.Count -gt 1) {
+        throw "Multiple '$copilotRulesetName' rulesets exist for $repository; reconcile them manually."
+    }
+    if ($matchingRulesets.Count -eq 1) {
+        Invoke-GitHubRequest -Method PUT -Path "repos/$repository/rulesets/$($matchingRulesets[0].id)" -Body $copilotRuleset | Out-Null
+    } else {
+        Invoke-GitHubRequest -Method POST -Path "repos/$repository/rulesets" -Body $copilotRuleset | Out-Null
+    }
+
     $protection = @{
         required_status_checks = @{
             strict = $true
-            contexts = @('validate')
+            contexts = @('validate', 'copilot-review')
         }
         enforce_admins = $true
         required_pull_request_reviews = @{
@@ -156,4 +192,4 @@ if ($PSCmdlet.ShouldProcess($repository, 'Harden repository, Actions, branch, se
 }
 
 Write-Host "GitHub protection configured for $repository."
-Write-Host "Production is reviewer-gated and restricted to the exact '$DefaultBranch' branch; pull requests are required without a self-approval deadlock."
+Write-Host "Production is reviewer-gated and restricted to the exact '$DefaultBranch' branch; pull requests require validation and an exact-head Copilot review without a self-approval deadlock."

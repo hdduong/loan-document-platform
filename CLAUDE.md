@@ -4,10 +4,16 @@ This public repository processes mortgage documents and extracted PII. Never com
 
 Read these sources before changing behavior:
 
-1. `contracts/openapi/loan-api.yaml` — authoritative HTTP contract.
-2. `docs/architecture.md` — identities, archives, processing, and trust boundaries.
-3. `docs/security.md` — mandatory production controls.
-4. `docs/ui-handoff.md` — authoritative React behavior.
+1. `.specify/memory/constitution.md` — project governance and non-negotiable quality gates.
+2. The active feature's `spec.md`, `plan.md`, and `tasks.md` — approved scope, design, and execution order. Resolve it through `.specify/feature.json`; the checked-in baseline is `specs/001-loan-document-platform/`.
+3. `contracts/openapi/loan-api.yaml` — authoritative HTTP contract.
+4. `docs/architecture.md` — identities, archives, processing, and trust boundaries.
+5. `docs/security.md` — mandatory production controls.
+6. `docs/ui-handoff.md` — authoritative React behavior.
+
+Use the Spec Kit skills under `.claude/skills/` for feature work. Invoke them as `/speckit-<command>`, not `/speckit.<command>`. Before implementation, make sure the active feature has a reviewed specification, plan, and task list. Treat the constitution, security controls, and existing API contract as constraints on feature artifacts; an intentional contract change must update the canonical contract and its tests in the same change. Do not hand-edit generated Spec Kit skills, scripts, or templates.
+
+For every request that changes the repository, work through a pull request and complete the mandatory Copilot loop before reporting completion: ensure `@copilot` is requested for the exact current head, wait for the review, inspect every thread, implement and test every sound constitution-compatible suggestion, and document the reason for rejecting an inapplicable or harmful suggestion. Pushes made to address feedback require another Copilot review of the new head. Do not merge or call the work complete until `validate` and `copilot-review` pass and all actionable conversations are resolved.
 
 Important invariants:
 
