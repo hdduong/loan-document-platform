@@ -37,7 +37,7 @@ def test_flow_html_has_complete_accessible_offline_structure(path: Path) -> None
     parser.feed(source)
     parser.close()
 
-    assert source.startswith("<!doctype html>\n<html lang=\"en\">")
+    assert source.splitlines()[:2] == ["<!doctype html>", '<html lang="en">']
     assert source.rstrip().endswith("</html>")
     assert "<script" not in source.lower()
     assert "style=" not in source.lower()
