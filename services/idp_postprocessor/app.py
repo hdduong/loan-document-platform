@@ -1079,15 +1079,23 @@ def artifact_prefix(route: dict[str, Any]) -> str:
     current_suffix = "/source.pdf"
     if source_key.startswith(current_prefix) and source_key.endswith(current_suffix):
         base_key = source_key[len(current_prefix) : -len(current_suffix)]
-        return f"{base_key}/artifacts/{route['runId']}"
+    else:
+        # Read compatibility for upload rows created before the dedicated top-level
+        # quarantine prefix. New uploads never use this legacy layout.
+        legacy_suffix = "/quarantine/source.pdf"
+        if not source_key.endswith(legacy_suffix):
+            raise EventError("UNEXPECTED_SOURCE_KEY")
+        base_key = source_key[: -len(legacy_suffix)]
 
-    # Read compatibility for upload rows created before the dedicated top-level
-    # quarantine prefix. New uploads never use this legacy layout.
-    legacy_suffix = "/quarantine/source.pdf"
-    if source_key.endswith(legacy_suffix):
-        return source_key[: -len(legacy_suffix)] + f"/artifacts/{route['runId']}"
-
-    raise EventError("UNEXPECTED_SOURCE_KEY")
+    segments = base_key.split("/")
+    if (
+        not base_key
+        or any(segment in {"", ".", ".."} for segment in segments)
+        or "\\" in base_key
+        or any(ord(character) < 32 or ord(character) == 127 for character in base_key)
+    ):
+        raise EventError("UNEXPECTED_SOURCE_KEY")
+    return f"{base_key}/artifacts/{route['runId']}"
 
 
 def put_versioned_object(bucket: str, key: str, body: bytes, content_type: str) -> dict[str, str]:

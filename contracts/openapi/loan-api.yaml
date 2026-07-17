@@ -50,6 +50,8 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateLoanRequest'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
           description: A new active loan instance was created.
           content:
@@ -68,13 +70,14 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Current loan instance and archive history.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LoanView' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '413': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/archive:
@@ -88,6 +91,8 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
           description: The loan was archived; an idempotent replay returns this exact response.
           content:
@@ -107,13 +112,14 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Read-only loan archive manifest view.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LoanArchiveView' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '413': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}:
@@ -128,6 +134,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Document snapshot captured by an immutable loan archive.
           content:
@@ -149,6 +157,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Prior document-version archive belonging to an archived loan instance.
           content:
@@ -170,6 +180,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Data points pinned by a prior document-version archive in an archived loan.
           content:
@@ -191,6 +203,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for data points pinned by a prior document-version archive.
           content:
@@ -216,6 +230,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact PDF pinned by a prior document-version archive.
           content:
@@ -236,6 +252,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Extracted data-point JSON pinned by the loan archive.
           content:
@@ -256,6 +274,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for data points pinned by the loan archive.
           content:
@@ -280,6 +300,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact PDF version pinned by the loan archive.
           content:
@@ -304,6 +326,7 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/CreateUploadRequest' }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '201':
           description: >-
             Stable logical document and first physical upload were initialized.
@@ -313,7 +336,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/UploadSession' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '413': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
@@ -334,6 +357,8 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/CreateUploadRequest' }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
           description: >-
             Replacement upload initialized under the stable document ID. An exact
@@ -365,6 +390,8 @@ paths:
               type: object
               additionalProperties: false
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '202':
           description: Exact S3 version was captured and validation/malware reconciliation is pending.
           content:
@@ -386,13 +413,14 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Current logical document and physical upload/processing state.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DocumentView' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '413': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/documents/{documentId}/archive:
@@ -407,6 +435,8 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
           description: The current version was archived; an idempotent replay returns this exact response.
           content:
@@ -427,6 +457,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Read-only document archive metadata.
           content:
@@ -447,6 +479,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Data points pinned by a prior document-version archive.
           content:
@@ -467,6 +501,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for data points pinned by a prior document-version archive.
           content:
@@ -491,6 +527,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact PDF pinned by a prior document-version archive.
           content:
@@ -510,6 +548,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Extracted data-point JSON. Shape depends on the pinned IDP schema version.
           content:
@@ -517,7 +556,7 @@ paths:
               schema: { type: object, additionalProperties: true }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '413': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/documents/{documentId}/data-points/download:
@@ -531,6 +570,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for the pinned data-point object version.
           content:
@@ -554,6 +595,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact S3 object version.
           content:
@@ -634,6 +677,19 @@ components:
       required: true
       schema: { type: integer, minimum: 1 }
   responses:
+    BadRequest:
+      description: >-
+        Request metadata or content is invalid, including a malformed or
+        inconsistent Content-Length value, a non-UTF-8 body, or an
+        operation-specific request validation failure.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Request body exceeds the Azure API configured bounded-body limit.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     Problem:
       description: RFC 9457 problem detail.
       content:

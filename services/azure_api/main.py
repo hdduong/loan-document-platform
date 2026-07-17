@@ -309,7 +309,7 @@ def create_app(
         try:
             envelope = _envelope(request, body, principal, correlation_id)
         except UnicodeDecodeError:
-            return _problem(400, "INVALID_BODY", "Request metadata must be UTF-8", correlation_id)
+            return _problem(400, "INVALID_BODY", "Request body must be UTF-8", correlation_id)
 
         try:
             minimum_lifetime = (

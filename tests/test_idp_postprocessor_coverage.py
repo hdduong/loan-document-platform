@@ -486,6 +486,28 @@ def test_versioned_artifacts_use_checksums_and_required_encryption(
         postprocessor.artifact_prefix(broken)
 
 
+@pytest.mark.parametrize(
+    "source_key",
+    [
+        "quarantine/source.pdf",
+        "/quarantine/source.pdf",
+        "quarantine//tenants/tenant/source.pdf",
+        "quarantine/tenants//tenant/source.pdf",
+        "quarantine/tenants/./tenant/source.pdf",
+        "quarantine/tenants/../tenant/source.pdf",
+        "quarantine/tenants\\tenant/source.pdf",
+        "quarantine/tenants/tenant\x00/source.pdf",
+        "../quarantine/source.pdf",
+    ],
+)
+def test_artifact_prefix_rejects_empty_or_unsafe_base_keys(source_key: str) -> None:
+    value = route()
+    value["upload"]["sourceKey"] = source_key
+
+    with pytest.raises(postprocessor.EventError, match="UNEXPECTED_SOURCE_KEY"):
+        postprocessor.artifact_prefix(value)
+
+
 def synthetic_pdf(page_count: int = 2) -> bytes:
     writer = PdfWriter()
     for _ in range(page_count):

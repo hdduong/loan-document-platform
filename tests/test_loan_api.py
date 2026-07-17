@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 
 class _KeyExpression:
     def __and__(self, other: object) -> "_KeyExpression":
@@ -483,6 +485,29 @@ class ContractTests(unittest.TestCase):
         self.assertIn("/archives/{documentArchiveSequence}/data-points/download:", contract)
         self.assertIn("clientCredentials:", contract)
         self.assertIn("items: { $ref: '#/components/schemas/ArchivedLoanDocumentView' }", contract)
+
+    def test_contract_documents_adapter_wide_request_body_failures(self) -> None:
+        contract_path = Path(__file__).resolve().parents[1] / "contracts" / "openapi" / "loan-api.yaml"
+        contract = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
+
+        product_operations = [
+            operation
+            for path, path_item in contract["paths"].items()
+            if path.startswith("/v1/")
+            for method, operation in path_item.items()
+            if method in {"get", "post"}
+        ]
+        self.assertGreater(len(product_operations), 0)
+        for operation in product_operations:
+            with self.subTest(operationId=operation["operationId"]):
+                self.assertEqual(
+                    operation["responses"]["400"]["$ref"],
+                    "#/components/responses/BadRequest",
+                )
+                self.assertEqual(
+                    operation["responses"]["413"]["$ref"],
+                    "#/components/responses/PayloadTooLarge",
+                )
 
 
 if __name__ == "__main__":
