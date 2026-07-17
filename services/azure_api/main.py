@@ -166,7 +166,20 @@ def _domain_response(result: Any) -> Response:
     if not isinstance(result, Mapping) or "statusCode" not in result:
         raise DomainResponseError("The loan domain returned an unsupported response")
 
-    status = int(result["statusCode"])
+    raw_status = result["statusCode"]
+    if isinstance(raw_status, bool):
+        raise DomainResponseError("The loan domain returned an invalid status code")
+    if isinstance(raw_status, int):
+        status = raw_status
+    elif isinstance(raw_status, str) and raw_status.isascii() and raw_status.isdigit():
+        try:
+            status = int(raw_status)
+        except ValueError as exc:
+            raise DomainResponseError("The loan domain returned an invalid status code") from exc
+    else:
+        raise DomainResponseError("The loan domain returned an invalid status code")
+    if not 100 <= status <= 599:
+        raise DomainResponseError("The loan domain returned an invalid status code")
     headers = {
         str(name): str(value)
         for name, value in (result.get("headers") or {}).items()

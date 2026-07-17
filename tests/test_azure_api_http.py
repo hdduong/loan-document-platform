@@ -691,6 +691,67 @@ def test_async_bare_json_value_is_rejected_and_valid_domain_responses_are_suppor
     assert native_response.content == b"native-response"
 
 
+@pytest.mark.parametrize(
+    "malformed_status",
+    [
+        pytest.param("200 OK", id="non-integer-string"),
+        pytest.param(None, id="none"),
+        pytest.param(True, id="boolean"),
+        pytest.param(200.0, id="float"),
+        pytest.param(99, id="integer-below-range"),
+        pytest.param(600, id="integer-above-range"),
+        pytest.param("099", id="string-below-range"),
+        pytest.param("600", id="string-above-range"),
+    ],
+)
+def test_malformed_domain_status_is_a_sanitized_adapter_error(malformed_status: object) -> None:
+    test_client, _, _, _ = client(
+        domain=Domain(
+            {
+                "statusCode": malformed_status,
+                "headers": {"content-type": "text/plain"},
+                "body": "must not leak",
+            }
+        )
+    )
+
+    with test_client:
+        response = test_client.get("/v1/loans/23051", headers={"authorization": "Bearer token"})
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "DOMAIN_RESPONSE_INVALID"
+    assert response.json()["detail"] == "The domain service returned an invalid response"
+    assert "must not leak" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("domain_status", "expected_status"),
+    [
+        pytest.param(201, 201, id="integer"),
+        pytest.param("202", 202, id="integer-string"),
+    ],
+)
+def test_domain_status_accepts_integers_and_integer_strings(
+    domain_status: int | str,
+    expected_status: int,
+) -> None:
+    test_client, _, _, _ = client(
+        domain=Domain(
+            {
+                "statusCode": domain_status,
+                "headers": {"content-type": "text/plain"},
+                "body": "accepted",
+            }
+        )
+    )
+
+    with test_client:
+        response = test_client.get("/v1/loans/23051", headers={"authorization": "Bearer token"})
+
+    assert response.status_code == expected_status
+    assert response.text == "accepted"
+
+
 @pytest.mark.parametrize("malformed_body", ["not-base64!", "\N{SNOWMAN}", None, {"not": "base64"}])
 def test_malformed_base64_domain_response_is_a_sanitized_adapter_error(
     malformed_body: object,
