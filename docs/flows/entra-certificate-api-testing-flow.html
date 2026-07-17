@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Certificate-authenticated API testing and Azure-to-AWS federation flow for the Loan Document Platform.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Entra certificate client and AWS federation — API testing flow</title>
+  <link rel="stylesheet" href="identity-flow.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to the flow</a>
+  <main id="main" class="wrap">
+    <header>
+      <p class="eyebrow">Loan Document Platform · reviewed target flow</p>
+      <h1>Entra certificate client across Azure and AWS</h1>
+      <p class="lede">
+        An automated caller uses a certificate-signed client assertion to obtain an app-only
+        <span class="chip chip-machine">PRODUCT TOKEN</span>. If Postman is used, a
+        certificate-capable helper or runner should inject only that short-lived token; the
+        collection does not store a client secret, private key, token, PDF, or signed URL.
+        A machine test proves the app-only path. It does not prove browser PKCE, Conditional
+        Access, delegated scopes, UI CORS, or MSAL renewal.
+      </p>
+      <nav class="page-nav" aria-label="Related flow documentation">
+        <a href="entra-ui-flow.html">Target browser flow</a>
+        <a href="README.md">GitHub-readable flow guide</a>
+        <a href="../security.md">Security policy</a>
+        <a href="../../contracts/openapi/loan-api.yaml">OpenAPI contract</a>
+      </nav>
+    </header>
+
+    <section class="setup" aria-labelledby="setup-heading">
+      <h2 id="setup-heading">One-time scripted setup</h2>
+      <ul>
+        <li>
+          <strong>Product identity:</strong> register a per-environment Entra service client,
+          upload only its CA-issued public certificate, assign the required application roles,
+          grant consent, and add its client ID to the Azure ingress/API allowlists. The production
+          example does not create this optional client by default. A production integration uses
+          its own principal and certificate lifecycle, never a shared test identity.
+        </li>
+        <li>
+          <strong>Azure runtime identity:</strong> attach a dedicated user-assigned managed
+          identity to the Azure API. It alone receives the federation application's
+          <span class="mono">AwsFederation.AssumeRole</span> role; no runtime client secret or
+          AWS access key exists.
+        </li>
+        <li>
+          <strong>AWS trust:</strong> configure an IAM OIDC provider for
+          <span class="mono">https://sts.windows.net/&lt;tenant-guid&gt;/</span>. The runtime
+          role pins <span class="mono">aud = api://&lt;federation-application-guid&gt;</span> and
+          <span class="mono">sub = &lt;managed-identity-principal-object-id&gt;</span> exactly.
+        </li>
+        <li>
+          <strong>AWS permissions:</strong> restrict the role to the named DynamoDB table and
+          indexes, exact quarantine/artifact/manifest S3 prefixes, KMS use through S3 for those
+          objects, and the named upload-processor reconciliation function. It cannot call
+          AppSync, the optional Jobs REST API, an IDP state machine, IAM, or deployment APIs.
+        </li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="sequence-heading">
+      <h2 id="sequence-heading">End-to-end test sequence</h2>
+      <p class="scroll-hint">On a narrow screen, focus this region and scroll horizontally to follow all four lanes.</p>
+      <div class="scroller" role="region" aria-labelledby="sequence-heading" tabindex="0">
+        <div class="diagram">
+          <div class="grid actor-row" aria-hidden="true">
+            <div class="actor"><div class="name">Test runner / Postman</div><div class="role">certificate client + API calls</div></div>
+            <div class="actor"><div class="name">Microsoft Entra ID</div><div class="role">v2 product + v1 workload tokens</div></div>
+            <div class="actor"><div class="name">Azure API</div><div class="role">only product control plane</div></div>
+            <div class="actor"><div class="name">Private AWS</div><div class="role">STS · DynamoDB · S3 · processors · IDP</div></div>
+          </div>
+          <div class="lifelines" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+
+          <div class="grid">
+            <div class="msg ltr c1-2">
+              <p class="label">
+                <span class="sr-only">Test runner to Microsoft Entra ID. </span><span class="n">1</span>
+                <strong>Client credentials:</strong>
+                <span class="mono">scope=api://&lt;product-api-client-guid&gt;/.default</span> plus a
+                <span class="mono">private_key_jwt</span> client assertion signed by the service
+                client's private certificate.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg rtl c1-2">
+              <p class="label">
+                <span class="sr-only">Microsoft Entra ID to test runner. </span><span class="n">2</span>
+                <span class="chip chip-machine">PRODUCT TOKEN</span> with
+                <span class="mono">aud=&lt;product-api-client-guid&gt;</span>, assigned
+                <span class="mono">roles</span>, <span class="mono">idtyp=app</span>,
+                <span class="mono">azpacr=2</span>, service-principal <span class="mono">oid</span>,
+                and no <span class="mono">scp</span>. Honor its actual expiry and refresh early.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Test runner to Azure API. </span><span class="n">3</span>
+                <strong><span class="mono">POST /v1/loans</span></strong> with Bearer token, a new
+                create-loan <span class="mono">Idempotency-Key</span>, correlation ID, and
+                <span class="mono">{"loanId":"23051"}</span>.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="checkpoint">
+              <b>Azure verifies the app-only caller</b>
+              Signature, exact v2 tenant issuer, bare product API GUID audience, lifetime,
+              tenant, immutable actor, allowed client, <span class="mono">idtyp=app</span>,
+              <span class="mono">azpacr=2</span>, and the route's application role.
+              <span class="deny"> Invalid authentication is 401; a valid token that fails policy is 403.
+              If ingress rejects first, its body need not be the application's canonical problem shape.</span>
+            </div>
+
+            <div class="msg rtl c2-3">
+              <p class="label">
+                <span class="sr-only">Azure API to Microsoft Entra ID. </span><span class="n">4</span>
+                On the first AWS-backed call, or before cached credentials expire, the managed
+                identity requests a dedicated v1 <span class="chip chip-workload">WORKLOAD TOKEN</span>.
+                The caller's product token stays at the Azure boundary.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c2-3">
+              <p class="label">
+                <span class="sr-only">Microsoft Entra ID to Azure API. </span><span class="n">5</span>
+                Workload token with issuer
+                <span class="mono">https://sts.windows.net/&lt;tenant-guid&gt;/</span>, audience
+                <span class="mono">api://&lt;federation-application-guid&gt;</span>, and subject equal
+                to the managed identity's principal/object ID.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c3-4">
+              <p class="label">
+                <span class="sr-only">Azure API to AWS STS. </span><span class="n">6</span>
+                <strong><span class="mono">AssumeRoleWithWebIdentity</span></strong> presents the
+                workload token; the call itself requires no pre-existing AWS credentials.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="checkpoint aws-check">
+              <b>AWS verifies the Azure workload</b>
+              The IAM OIDC provider validates the v1 issuer/JWKS and the role's exact audience and
+              subject conditions. A product token fails this trust. STS credentials are bounded by
+              configured session and token lifetimes, cached only in API memory, and refreshed early.
+            </div>
+
+            <div class="msg rtl c3-4">
+              <p class="label">
+                <span class="sr-only">AWS STS to Azure API. </span><span class="n">7</span>
+                <span class="chip chip-aws">TEMPORARY AWS CREDENTIALS</span> for the one exact
+                runtime role. They are never returned to the caller.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c3-4">
+              <p class="label">
+                <span class="sr-only">Azure API to private AWS. </span><span class="n">8</span>
+                Create the active loan registry item with a server-issued immutable
+                <span class="mono">loanInstanceId</span> using a conditional DynamoDB transaction.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg rtl c1-3">
+              <p class="label">
+                <span class="sr-only">Azure API to test runner. </span><span class="n">9</span>
+                <strong>201</strong> with <span class="mono">loanId=23051</span> and the generated
+                <span class="mono">loanInstanceId</span>.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Test runner to Azure API. </span><span class="n">10</span>
+                <strong><span class="mono">POST /v1/loans/23051/documents</span></strong> with a new
+                create-document idempotency key and
+                <span class="mono">fileName</span>, PDF content type, byte size, and Base64 SHA-256.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c3-4">
+              <p class="label">
+                <span class="sr-only">Azure API to private AWS. </span><span class="n">11</span>
+                Transactionally register the stable <span class="mono">documentId</span> and physical
+                <span class="mono">uploadId</span>; create an exact-key, PDF-only, size/checksum/KMS-
+                constrained presigned POST. Default lifetime is 600 seconds and is capped by the
+                remaining STS credential lifetime.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg rtl c1-3">
+              <p class="label">
+                <span class="sr-only">Azure API to test runner. </span><span class="n">12</span>
+                <strong>201</strong> with <span class="mono">documentId</span>,
+                <span class="mono">uploadId</span>, <span class="mono">AWAITING_UPLOAD</span>, expiry,
+                and <span class="chip chip-grant">PRESIGNED POST</span>. Never AWS credentials.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-4">
+              <p class="label">
+                <span class="sr-only">Test runner directly to Amazon S3. </span><span class="n">13</span>
+                Multipart POST every returned form field and append the PDF last. Deliberately send
+                <strong>no Entra bearer token</strong>; S3 enforces the signed policy and configured CORS.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Test runner to Azure API. </span><span class="n">14</span>
+                <strong><span class="mono">POST .../uploads/{uploadId}/complete</span></strong> with
+                its own completion-intent key and an empty body. Response <strong>202</strong> pins
+                one exact S3 <span class="mono">VersionId</span> and reports
+                <span class="mono">VALIDATING</span>. A retry reuses this completion key; it does not
+                upload the PDF again.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="async-note">
+              <b>Asynchronous convergence inside AWS:</b>
+              object creation starts GuardDuty malware scanning independently of completion. The
+              processor proceeds only when the same pinned version is client-complete and
+              <span class="mono">NO_THREATS_FOUND</span>, then verifies checksum, size, encryption,
+              metadata, PDF structure, and page limit. Persisted normal states are
+              <span class="mono">AWAITING_UPLOAD → VALIDATING → QUEUED → SCREENING → EXTRACTING → SUCCEEDED</span>.
+              Selection is committed atomically between screening and extraction; terminal alternatives
+              are <span class="mono">HOLD</span>, <span class="mono">REJECTED</span>, and
+              <span class="mono">FAILED</span>.
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Test runner to Azure API. </span><span class="n">15</span>
+                Poll <span class="mono">GET .../documents/{documentId}</span>. On success, request
+                bounded inline data points or a fresh source/selected/data-points download grant.
+                Every Azure call is re-authorized for its route.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg rtl c1-3">
+              <p class="label">
+                <span class="sr-only">Azure API to test runner. </span><span class="n">16</span>
+                Inline JSON or <span class="chip chip-grant">DOWNLOAD GRANT</span> with
+                <span class="mono">expiresAt</span>. The default signed-URL lifetime is 120 seconds,
+                also capped by the remaining STS lifetime.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-4">
+              <p class="label">
+                <span class="sr-only">Test runner directly to Amazon S3. </span><span class="n">17</span>
+                GET the exact-version artifact directly from S3 without an Entra token. A signed URL
+                can be reused until expiry; request a fresh grant after expiry.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="archive-heading">
+      <h2 id="archive-heading">Archive and replacement continuation</h2>
+      <div class="lifecycle-grid">
+        <article class="card">
+          <h3>1 · Archive a terminal document</h3>
+          <p>
+            <span class="mono">POST /v1/loans/{loanId}/documents/{documentId}/archive</span> with a
+            new document-archive intent key. The immutable snapshot receives display alias
+            <span class="mono">documentId_001</span>; the logical <span class="mono">documentId</span>
+            remains stable.
+          </p>
+        </article>
+        <article class="card">
+          <h3>2 · Upload a replacement</h3>
+          <p>
+            <span class="mono">POST .../documents/{documentId}/uploads</span> creates a new
+            <span class="mono">uploadId</span> and repeats upload, completion, and processing. Its
+            later archive becomes <span class="mono">_002</span>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>3 · Archive the loan</h3>
+          <p>
+            When no owned document is incomplete or processing,
+            <span class="mono">POST /v1/loans/{loanId}/archive</span> creates an immutable manifest
+            for every document and exact artifact version. It does not move, rename, or copy S3
+            objects. The first loan alias is <span class="mono">23051_001</span>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>4 · Recreate the business key</h3>
+          <p>
+            A later <span class="mono">POST /v1/loans</span> with <span class="mono">23051</span>
+            creates a new <span class="mono">loanInstanceId</span>. Archiving it allocates
+            <span class="mono">23051_002</span>; prior archives remain read-only.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="ownership-heading">
+      <h2 id="ownership-heading">Who holds what</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Credential and capability boundaries</caption>
+          <thead>
+            <tr><th scope="col">Party</th><th scope="col">May hold</th><th scope="col">Never holds or receives</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Certificate-capable runner</strong></td>
+              <td>Private key in its approved vault/key store; short-lived product token; short-lived S3 grants</td>
+              <td class="never">AWS credentials or workload token</td>
+            </tr>
+            <tr>
+              <td><strong>Postman, when used</strong></td>
+              <td>Injected product token and returned S3 grants in memory for the run</td>
+              <td class="never">Client secret, certificate private key, AWS credentials, or production test identity</td>
+            </tr>
+            <tr>
+              <td><strong>Azure API</strong></td>
+              <td>Caller token for the request; transient workload token; temporary AWS credentials cached in memory</td>
+              <td class="never">Stored caller secret/private key or long-lived AWS key</td>
+            </tr>
+            <tr>
+              <td><strong>Microsoft Entra ID</strong></td>
+              <td>Public service certificate, assignments, consent, and token-signing keys</td>
+              <td class="never">Service private key or AWS credential</td>
+            </tr>
+            <tr>
+              <td><strong>AWS</strong></td>
+              <td>OIDC provider, exact role trust, encrypted objects, registry, and processing artifacts</td>
+              <td class="never">Product bearer token, Entra client secret, or end-user identity via STS</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="footnote">
+        STS role assumption is attributable to the Azure runtime session. Azure records the validated
+        caller <span class="mono">oid</span>; the correlation ID joins sanitized diagnostics but is not
+        itself a user identity. Enable and verify CloudTrail S3/DynamoDB data events separately when
+        production audit policy requires them—the repository does not claim every data action is
+        automatically recorded by a trail.
+      </p>
+    </section>
+  </main>
+</body>
+</html>

@@ -90,10 +90,15 @@ Render `application/problem+json` safely with correlation ID. Never show raw HTM
 Canonical processing progression:
 
 ```text
-AWAITING_UPLOAD -> VALIDATING -> QUEUED -> SCREENING -> SELECTED -> EXTRACTING -> SUCCEEDED
+AWAITING_UPLOAD -> VALIDATING -> QUEUED -> SCREENING -> EXTRACTING -> SUCCEEDED
 ```
 
-Terminal alternatives are `HOLD`, `REJECTED`, and `FAILED`. `ARCHIVING` disables mutations; `ARCHIVED` is read-only. An unknown future state renders as Processing and disables destructive actions.
+Selection is committed atomically between `SCREENING` and `EXTRACTING`; the
+current processor does not persist `SELECTED` as a guaranteed polling state.
+`SELECTED` remains a recognized contract value, so the UI must still tolerate
+it. Terminal alternatives are `HOLD`, `REJECTED`, and `FAILED`. `ARCHIVING`
+disables mutations; `ARCHIVED` is read-only. An unknown future state renders as
+Processing and disables destructive actions.
 
 ## Data and download safety
 

@@ -10,6 +10,7 @@ Read these sources before changing behavior:
 4. `docs/architecture.md` — identities, archives, processing, and trust boundaries.
 5. `docs/security.md` — mandatory production controls.
 6. `docs/ui-handoff.md` — authoritative React behavior.
+7. `docs/flows/README.md` — reviewed interactive and certificate-client sequence companion.
 
 Use the Spec Kit skills under `.claude/skills/` for feature work. Invoke them as `/speckit-<command>`, not `/speckit.<command>`. Before implementation, make sure the active feature has a reviewed specification, plan, and task list. Treat the constitution, security controls, and existing API contract as constraints on feature artifacts; an intentional contract change must update the canonical contract and its tests in the same change. Do not hand-edit generated Spec Kit skills, scripts, or templates.
 

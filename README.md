@@ -93,6 +93,13 @@ audience, and managed-identity subject. Returned credentials are temporary,
 least-privilege, memory-only, and refreshed before expiry. The browser's bearer
 token is never forwarded to AWS.
 
+Detailed identity flows are documented in [Entra UI and certificate-client
+flows](docs/flows/README.md). Interactive users use authorization code with
+PKCE. Automated callers use certificate-backed client credentials;
+client-secret tokens are intentionally rejected. Both call only the
+Entra-protected Azure API. Caller tokens never enter AWS, and callers receive
+only short-lived, object-constrained S3 grants—never AWS credentials.
+
 ## Repository and delivery bootstrap
 
 1. Copy `config/environments/prod.example.json` to an ignored environment file
@@ -153,6 +160,7 @@ refreshed only through `scripts/sync-spec-kit.ps1`.
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Identity and end-to-end flows](docs/flows/README.md)
 - [Claude UI handoff](docs/ui-handoff.md)
 - [Security and certificates](docs/security.md)
 - [Operations runbook](docs/runbook.md)
