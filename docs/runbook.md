@@ -106,6 +106,10 @@ and re-verify the committed policy. Never weaken the committed policy as part of
 an ordinary release.
 11. Build the Azure API container, resolve the immutable digest, and deploy a
     Container Apps revision through `scripts/deploy-azure.ps1 -BindCustomDomain`.
+    The script invokes the repository-owned `infra/azure/acr-build-api.yml`
+    multi-step ACR task. That task explicitly enables BuildKit, builds from
+    `services/azure_api/Dockerfile`, and performs a separate push because ACR
+    multi-step builds do not push implicitly. CI enables the same BuildKit mode.
     Its `/ready` probe obtains a real managed-identity token,
     verifies exact `aud`/`sub`, and completes AWS STS federation before the
     revision is accepted. The validation TXT/certificate step does not change

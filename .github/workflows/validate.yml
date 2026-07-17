@@ -58,6 +58,8 @@ jobs:
         run: az bicep build --file infra/azure/main.bicep --stdout > /dev/null
 
       - name: Build secretless non-root API container
+        env:
+          DOCKER_BUILDKIT: '1'
         run: |
           docker build --file services/azure_api/Dockerfile --tag loan-document-api:validation .
           test "$(docker image inspect --format '{{.Config.User}}' loan-document-api:validation)" = '10001:10001'

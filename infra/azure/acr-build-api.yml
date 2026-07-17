@@ -1,0 +1,10 @@
+version: v1.1.0
+env:
+  - DOCKER_BUILDKIT=1
+steps:
+  - build: >-
+      --tag $Registry/{{.Values.image}}
+      --file services/azure_api/Dockerfile
+      .
+  - push:
+      - $Registry/{{.Values.image}}

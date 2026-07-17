@@ -568,14 +568,15 @@ if ($ImageRepository -notmatch '^[a-z0-9]+(?:[._/-][a-z0-9]+)*$') { throw "Image
 
 if (-not $SkipImageBuild) {
     if ($PSCmdlet.ShouldProcess("$($config.azureContainerRegistryName)/${ImageRepository}:$ImageTag", 'Build API image in ACR')) {
-        & az acr build `
+        $acrBuildTask = Join-Path $root 'infra/azure/acr-build-api.yml'
+        & az acr run `
             --subscription $config.azureSubscriptionId `
             --registry $config.azureContainerRegistryName `
-            --image "${ImageRepository}:$ImageTag" `
-            --file (Join-Path $root 'services/azure_api/Dockerfile') `
+            --file $acrBuildTask `
+            --set "image=${ImageRepository}:$ImageTag" `
             $root `
             --output none
-        if ($LASTEXITCODE -ne 0) { throw 'Azure Container Registry image build failed.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Azure Container Registry BuildKit task failed.' }
     }
 }
 $digest = & az acr manifest show-metadata `

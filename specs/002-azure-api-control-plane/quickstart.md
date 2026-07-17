@@ -52,6 +52,11 @@ the container build as an ephemeral BuildKit secret, for example
 `--secret id=enterprise_ca,src=<ignored-local-ca.pem>`. The Dockerfile uses it
 only for dependency download; it is not copied into the image or build context.
 Never use `--trusted-host`, disable TLS verification, or commit the certificate.
+Set `DOCKER_BUILDKIT=1` for any manual Docker build. Pull-request validation
+sets it explicitly, while production uses `infra/azure/acr-build-api.yml`: the
+repository-owned ACR task enables BuildKit and has distinct build and push steps
+before deployment resolves and scans the immutable digest. This follows the
+[ACR Tasks YAML reference](https://learn.microsoft.com/azure/container-registry/container-registry-tasks-reference-yaml).
 
 When `apps/web/package.json` exists, also run the locked React checks against the production build:
 

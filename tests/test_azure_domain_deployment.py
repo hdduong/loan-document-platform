@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON_MODULE = ROOT / "scripts" / "common.psm1"
@@ -134,6 +135,37 @@ def test_bicep_and_runtime_share_the_strict_environment_enum() -> None:
         assert f'"{environment}"' in settings
     assert "@allowed([" in bicep
     assert "SUPPORTED_ENVIRONMENTS" in settings
+
+
+def test_ci_and_production_image_builds_explicitly_use_buildkit() -> None:
+    workflow_text = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    workflow_steps = workflow["jobs"]["validate"]["steps"]
+    docker_step = next(step for step in workflow_steps if "docker build" in step.get("run", ""))
+    assert docker_step["env"]["DOCKER_BUILDKIT"] == "1"
+
+    dockerfile = (ROOT / "services" / "azure_api" / "Dockerfile").read_text(encoding="utf-8")
+    assert "RUN --mount=type=secret,id=enterprise_ca,required=false" in dockerfile
+    for line in dockerfile.splitlines():
+        if line.startswith("# syntax="):
+            assert "@sha256:" in line
+
+    task_path = ROOT / "infra" / "azure" / "acr-build-api.yml"
+    task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+    expected_image = "$Registry/{{.Values.image}}"
+    assert task["env"] == ["DOCKER_BUILDKIT=1"]
+    assert "--file services/azure_api/Dockerfile" in task["steps"][0]["build"]
+    assert f"--tag {expected_image}" in task["steps"][0]["build"]
+    assert task["steps"][1]["push"] == [expected_image]
+
+    deploy_script = (ROOT / "scripts" / "deploy-azure.ps1").read_text(encoding="utf-8")
+    assert "az acr build" not in deploy_script
+    for fragment in (
+        "az acr run",
+        "infra/azure/acr-build-api.yml",
+        '--set "image=${ImageRepository}:$ImageTag"',
+    ):
+        assert fragment in deploy_script
 
 
 def test_azure_deployment_preserves_domains_and_waits_for_a_ready_certificate() -> None:

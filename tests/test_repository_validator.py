@@ -143,6 +143,16 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "name: 'MAXIMUM_QUERY_ITEMS' name: 'MAXIMUM_LOAN_ARCHIVE_DOCUMENTS' "
             "name: 'MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES'"
         ),
+        "infra/azure/acr-build-api.yml": (
+            "version: v1.1.0\n"
+            "env:\n"
+            "  - DOCKER_BUILDKIT=1\n"
+            "steps:\n"
+            "  - build: --tag $Registry/{{.Values.image}} "
+            "--file services/azure_api/Dockerfile .\n"
+            "  - push:\n"
+            "      - $Registry/{{.Values.image}}\n"
+        ),
         "services/azure_api/main.py": "# runtime HOST_NOT_ALLOWED",
         "services/azure_api/auth.py": "# auth",
         "services/azure_api/aws_credentials.py": "# federation",
@@ -178,6 +188,8 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "starlette==1.3.1\n"
         ),
         "scripts/deploy-azure.ps1": (
+            "az acr run --file infra/azure/acr-build-api.yml "
+            '--set "image=${ImageRepository}:$ImageTag" '
             "trivy image --severity HIGH,CRITICAL --ignore-unfixed "
             "--format cyclonedx # Production deployment cannot skip "
             "Get-LiveApiCustomDomainBinding dnsCutoverPerformed "
@@ -197,10 +209,18 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "run: ./scripts/install-trivy.ps1\n"
         ),
         ".github/workflows/validate.yml": (
-            "run: ./scripts/install-trivy.ps1\n"
-            "trivy image --scanners vuln --severity HIGH,CRITICAL "
+            "jobs:\n"
+            "  validate:\n"
+            "    steps:\n"
+            "      - name: Build image\n"
+            "        env:\n"
+            "          DOCKER_BUILDKIT: '1'\n"
+            "        run: docker build --file services/azure_api/Dockerfile .\n"
+            "      - run: ./scripts/install-trivy.ps1\n"
+            "      - run: >-\n"
+            "          trivy image --scanners vuln --severity HIGH,CRITICAL "
             "--ignore-unfixed --exit-code 1 image\n"
-            "trivy image --format cyclonedx image\n"
+            "      - run: trivy image --format cyclonedx image\n"
         ),
     }
     for relative_path, content in files.items():
@@ -215,6 +235,40 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
     template = repository / "infra" / "api" / "template.yaml"
     template.write_text(template.read_text(encoding="utf-8").replace("AWS::ApiGatewayV2::Api", ""), encoding="utf-8")
     validator.validate_azure_control_plane()
+
+    acr_task_path = repository / "infra" / "azure" / "acr-build-api.yml"
+    acr_task = acr_task_path.read_text(encoding="utf-8")
+    acr_task_path.write_text(acr_task.replace("DOCKER_BUILDKIT=1", "DOCKER_BUILDKIT=0"), encoding="utf-8")
+    with pytest.raises(ValueError, match="explicitly enable BuildKit"):
+        validator.validate_azure_control_plane()
+    acr_task_path.write_text(acr_task, encoding="utf-8")
+
+    push_step = "  - push:\n      - $Registry/{{.Values.image}}\n"
+    acr_task_path.write_text(acr_task.replace(push_step, ""), encoding="utf-8")
+    with pytest.raises(ValueError, match="exactly one push step"):
+        validator.validate_azure_control_plane()
+    acr_task_path.write_text(acr_task, encoding="utf-8")
+
+    workflow_path = repository / ".github" / "workflows" / "validate.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    workflow_path.write_text(workflow.replace("DOCKER_BUILDKIT: '1'", "DOCKER_BUILDKIT: '0'"), encoding="utf-8")
+    with pytest.raises(ValueError, match="Docker builds must explicitly enable BuildKit"):
+        validator.validate_azure_control_plane()
+    workflow_path.write_text(workflow, encoding="utf-8")
+
+    dockerfile_path = repository / "services" / "azure_api" / "Dockerfile"
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+    dockerfile_path.write_text("# syntax=docker/dockerfile:1\n" + dockerfile, encoding="utf-8")
+    with pytest.raises(ValueError, match="frontend must be pinned by immutable digest"):
+        validator.validate_azure_control_plane()
+    dockerfile_path.write_text(dockerfile, encoding="utf-8")
+
+    deploy_path = repository / "scripts" / "deploy-azure.ps1"
+    deploy_script = deploy_path.read_text(encoding="utf-8")
+    deploy_path.write_text(deploy_script.replace("az acr run", "az acr build"), encoding="utf-8")
+    with pytest.raises(ValueError, match="Exact-image production gate lacks"):
+        validator.validate_azure_control_plane()
+    deploy_path.write_text(deploy_script, encoding="utf-8")
 
     retired_edge = repository / "scripts" / "deploy-edge.ps1"
     retired_edge.write_text("# legacy", encoding="utf-8")

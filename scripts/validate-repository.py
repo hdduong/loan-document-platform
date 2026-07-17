@@ -231,6 +231,7 @@ def validate_azure_control_plane() -> None:
 
     for relative_path in (
         "infra/azure/main.bicep",
+        "infra/azure/acr-build-api.yml",
         "services/azure_api/main.py",
         "services/azure_api/auth.py",
         "services/azure_api/aws_credentials.py",
@@ -267,8 +268,47 @@ def validate_azure_control_plane() -> None:
         "--mount=type=secret,id=enterprise_ca,required=false" in dockerfile,
         "Enterprise CA support must use an ephemeral BuildKit secret.",
     )
+    for frontend in re.findall(r"^#\s*syntax\s*=\s*(\S+)\s*$", dockerfile, re.MULTILINE):
+        require(
+            re.search(r"@sha256:[0-9a-f]{64}$", frontend) is not None,
+            "A Dockerfile syntax frontend must be pinned by immutable digest.",
+        )
     for prohibited in ("--trusted-host", "PIP_TRUSTED_HOST", "PIP_NO_VERIFY"):
         require(prohibited not in dockerfile, f"Docker TLS verification bypass is prohibited: {prohibited}")
+
+    acr_task_path = ROOT / "infra" / "azure" / "acr-build-api.yml"
+    acr_task = yaml.safe_load(acr_task_path.read_text(encoding="utf-8"))
+    require(isinstance(acr_task, dict), "The ACR API image task must be a YAML mapping.")
+    require(acr_task.get("version") == "v1.1.0", "The ACR API image task must use schema version v1.1.0.")
+    task_environment = acr_task.get("env")
+    require(
+        isinstance(task_environment, list) and "DOCKER_BUILDKIT=1" in task_environment,
+        "The ACR API image task must explicitly enable BuildKit.",
+    )
+    task_steps = acr_task.get("steps")
+    require(isinstance(task_steps, list), "The ACR API image task must define ordered steps.")
+    expected_acr_image = "$Registry/{{.Values.image}}"
+    build_positions = [
+        index for index, step in enumerate(task_steps) if isinstance(step, dict) and "build" in step
+    ]
+    push_positions = [
+        index for index, step in enumerate(task_steps) if isinstance(step, dict) and "push" in step
+    ]
+    require(len(build_positions) == 1, "The ACR API image task must define exactly one build step.")
+    require(len(push_positions) == 1, "The ACR API image task must define exactly one push step.")
+    require(build_positions[0] < push_positions[0], "The ACR API image task must push only after building.")
+    build_command = " ".join(str(task_steps[build_positions[0]]["build"]).split())
+    require(
+        f"--tag {expected_acr_image}" in build_command
+        and "--file services/azure_api/Dockerfile" in build_command
+        and build_command.endswith(" ."),
+        "The ACR API image task must build the reviewed Dockerfile from the repository root.",
+    )
+    pushed_images = task_steps[push_positions[0]]["push"]
+    require(
+        isinstance(pushed_images, list) and pushed_images == [expected_acr_image],
+        "The ACR API image task must explicitly push the parameterized registry image.",
+    )
 
     runtime_requirements = (ROOT / "services" / "azure_api" / "requirements.txt").read_text(encoding="utf-8")
     development_requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
@@ -475,6 +515,9 @@ def validate_azure_control_plane() -> None:
 
     deploy_azure = (ROOT / "scripts" / "deploy-azure.ps1").read_text(encoding="utf-8")
     for required_fragment in (
+        "az acr run",
+        "infra/azure/acr-build-api.yml",
+        '--set "image=${ImageRepository}:$ImageTag"',
         "trivy image",
         "--severity HIGH,CRITICAL",
         "--ignore-unfixed",
@@ -487,6 +530,7 @@ def validate_azure_control_plane() -> None:
         "maximumLoanArchiveManifestBytes",
     ):
         require(required_fragment in deploy_azure, f"Exact-image production gate lacks: {required_fragment}")
+    require("az acr build" not in deploy_azure, "Production image builds must use the explicit BuildKit ACR task.")
     cutover = (ROOT / "scripts" / "cutover-api-domain.ps1").read_text(encoding="utf-8")
     require("azure.api.imageScan" in cutover, "API DNS cutover must verify exact-image scan evidence.")
     trivy_installer = (ROOT / "scripts" / "install-trivy.ps1").read_text(encoding="utf-8")
@@ -516,6 +560,22 @@ def validate_azure_control_plane() -> None:
     require(
         "aquasecurity/setup-trivy@" not in validation_workflow,
         "Validation workflow uses an action outside the repository's selected-action allowlist.",
+    )
+    validation_document = yaml.load(validation_workflow, Loader=yaml.BaseLoader)
+    validation_jobs = validation_document.get("jobs", {}) if isinstance(validation_document, dict) else {}
+    require(isinstance(validation_jobs, dict), "Validation workflow jobs must be a mapping.")
+    docker_build_steps = [
+        step
+        for job in validation_jobs.values()
+        if isinstance(job, dict)
+        for step in job.get("steps", [])
+        if isinstance(step, dict) and "docker build" in str(step.get("run", ""))
+    ]
+    require(len(docker_build_steps) == 1, "Validation must contain exactly one Docker image build step.")
+    build_environment = docker_build_steps[0].get("env", {})
+    require(
+        isinstance(build_environment, dict) and build_environment.get("DOCKER_BUILDKIT") == "1",
+        "Validation Docker builds must explicitly enable BuildKit.",
     )
 
 
