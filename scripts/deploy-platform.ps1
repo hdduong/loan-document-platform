@@ -1,111 +1,102 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$EnvironmentFile,
-    [Security.SecureString]$OriginVerifySecret,
-    [string]$EntraDeploymentFile = '',
+    [string]$FederationDeploymentFile = '',
     [switch]$SkipBuild,
-    [switch]$AllowCoordinatedOriginSecretRotation
+    [switch]$AllowMissingIdp
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'common.psm1') -Force
 
-function Get-PlainSecret {
-    param([Security.SecureString]$Value)
-    if ($null -eq $Value) {
-        if ($env:LOAN_API_ORIGIN_VERIFY_SECRET) {
-            $Value = ConvertTo-SecureString $env:LOAN_API_ORIGIN_VERIFY_SECRET -AsPlainText -Force
-        } elseif ($env:GITHUB_ACTIONS -eq 'true') {
-            throw 'GitHub Environment secret LOAN_API_ORIGIN_VERIFY_SECRET is required.'
-        } else {
-            $Value = Read-Host 'CloudFront origin verification secret (32+ high-entropy characters)' -AsSecureString
-        }
+function Get-StackOutputMap {
+    param([Parameter(Mandatory)][object]$Stack)
+
+    $outputs = @{}
+    foreach ($output in @($Stack.Outputs)) {
+        $outputs[[string]$output.OutputKey] = [string]$output.OutputValue
     }
-    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
-    try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-    } finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
-    }
+    return $outputs
 }
 
-function Get-Sha256Hex {
-    param([Parameter(Mandatory)][string]$Value)
-    $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
-    try {
-        return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
-    } finally {
-        [Array]::Clear($bytes, 0, $bytes.Length)
+function Get-StackParameterMap {
+    param([Parameter(Mandatory)][object]$Stack)
+
+    $parameters = @{}
+    foreach ($parameter in @($Stack.Parameters)) {
+        $parameters[[string]$parameter.ParameterKey] = [string]$parameter.ParameterValue
     }
+    return $parameters
 }
 
-function Invoke-AwsRedacted {
+function Get-OptionalConfigValue {
     param(
-        [Parameter(Mandatory)][string[]]$BaseArguments,
-        [Parameter(Mandatory)][string[]]$Arguments,
-        [Parameter(Mandatory)][string]$FailureMessage
+        [Parameter(Mandatory)][object]$Config,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][object]$Default
     )
-    & aws @BaseArguments @Arguments
-    if ($LASTEXITCODE -ne 0) { throw $FailureMessage }
+    $property = $Config.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value -or
+        [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        return $Default
+    }
+    return $property.Value
 }
 
-function Try-GetOutputs {
-    param([string]$Profile, [string]$Region, [string]$StackName)
-    try {
-        return Get-StackOutputs -Profile $Profile -Region $Region -StackName $StackName
-    } catch {
-        return @{}
+function Require-Output {
+    param(
+        [Parameter(Mandatory)][hashtable]$Outputs,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$StackName
+    )
+    if (-not $Outputs.ContainsKey($Name) -or [string]::IsNullOrWhiteSpace([string]$Outputs[$Name])) {
+        throw "Stack '$StackName' is missing required output '$Name'."
     }
+    return [string]$Outputs[$Name]
 }
 
 $config = Read-EnvironmentConfig -Path $EnvironmentFile
 $root = Get-ProjectRoot
 Assert-Command -Name aws -InstallHint 'Install AWS CLI v2.'
 Assert-Command -Name sam -InstallHint 'Install AWS SAM CLI.'
-Assert-AwsIdentity -Profile $config.awsProfile -Region $config.awsRegion -ExpectedAccountId $config.awsAccountId | Out-Null
+Assert-AwsIdentity `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -ExpectedAccountId $config.awsAccountId | Out-Null
 
-$bootstrap = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.bootstrapStackName
-foreach ($requiredOutput in 'ArtifactBucketName', 'ArtifactKeyArn', 'CloudFormationExecutionRoleArn') {
-    if (-not $bootstrap.ContainsKey($requiredOutput)) {
-        throw "Bootstrap stack '$($config.bootstrapStackName)' is missing output '$requiredOutput'."
-    }
+$bootstrap = Get-StackOutputs `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.bootstrapStackName
+foreach ($requiredOutput in @(
+    'ArtifactBucketName',
+    'ArtifactKeyArn',
+    'PlatformCloudFormationExecutionRoleArn',
+    'PlatformRolePermissionsBoundaryArn'
+)) {
+    Require-Output -Outputs $bootstrap -Name $requiredOutput -StackName $config.bootstrapStackName | Out-Null
 }
 
-if (-not $EntraDeploymentFile) {
-    $EntraDeploymentFile = Join-Path $root ".local/entra-$($config.environment).json"
+if ([string]::IsNullOrWhiteSpace($FederationDeploymentFile)) {
+    $FederationDeploymentFile = Join-Path $root ".local/entra-aws-federation-$($config.environment).json"
 }
-if (Test-Path -LiteralPath $EntraDeploymentFile) {
-    $entra = Get-Content -Raw -LiteralPath $EntraDeploymentFile | ConvertFrom-Json -Depth 20
-    $entraTenantId = [string]$entra.tenantId
-    $entraAudience = [string]$entra.api.audience
-    $allowedClientIds = @([string]$entra.spa.clientId)
-    if ($null -ne $entra.service -and $entra.service.clientId) {
-        $allowedClientIds += [string]$entra.service.clientId
-    }
-} elseif ($env:ENTRA_API_CLIENT_ID -and $env:ENTRA_SPA_CLIENT_ID) {
-    $entraTenantId = [string]$config.entraTenantId
-    $entraAudience = $env:ENTRA_API_CLIENT_ID
-    $allowedClientIds = @($env:ENTRA_SPA_CLIENT_ID)
-    if ($env:ENTRA_SERVICE_CLIENT_ID) { $allowedClientIds += $env:ENTRA_SERVICE_CLIENT_ID }
-} else {
-    throw "Run scripts/provision-entra.ps1 first, pass -EntraDeploymentFile, or set ENTRA_API_CLIENT_ID and ENTRA_SPA_CLIENT_ID."
+if (-not (Test-Path -LiteralPath $FederationDeploymentFile)) {
+    throw "Federation deployment output is missing: $FederationDeploymentFile. Run deploy-azure.ps1 -FoundationOnly and provision-entra-federation.ps1 first."
 }
-if ($entraTenantId -ne [string]$config.entraTenantId) {
-    throw "Entra deployment tenant '$entraTenantId' does not match environment tenant '$($config.entraTenantId)'."
+$federation = Get-Content -Raw -LiteralPath $FederationDeploymentFile | ConvertFrom-Json -Depth 30
+$expectedIssuer = "https://sts.windows.net/$($config.entraTenantId)/"
+if ([string]$federation.tenantId -ne [string]$config.entraTenantId -or
+    [string]$federation.issuer -ne $expectedIssuer) {
+    throw 'Federation tenant or issuer does not match the environment.'
 }
-$allowedClientIds = @($allowedClientIds | Where-Object { $_ } | Select-Object -Unique)
-if ($allowedClientIds.Count -lt 1) { throw 'At least one Entra client application ID is required.' }
-
-$secretPlain = Get-PlainSecret -Value $OriginVerifySecret
-if ($secretPlain.Length -lt 32) { throw 'Origin verification secret must contain at least 32 characters.' }
-$secretDigest = Get-Sha256Hex -Value $secretPlain
-
-$edgeOutputs = Try-GetOutputs -Profile $config.awsProfile -Region 'us-east-1' -StackName $config.edgeStackName
-if ($edgeOutputs.ContainsKey('OriginVerifySecretDigest') -and
-    $edgeOutputs.OriginVerifySecretDigest -ne $secretDigest -and
-    -not $AllowCoordinatedOriginSecretRotation) {
-    throw 'The supplied origin secret differs from the deployed edge stack. Rotate through deploy-all.ps1 with -AllowCoordinatedOriginSecretRotation during a maintenance window.'
+if ([string]$federation.audience -notmatch '^api://[0-9a-fA-F-]{36}$') {
+    throw 'Federation audience must be a dedicated api:// application GUID.'
+}
+$federationSubject = [string]$federation.managedIdentity.principalId
+$parsedSubject = [guid]::Empty
+if (-not [guid]::TryParse($federationSubject, [ref]$parsedSubject)) {
+    throw 'Federation managed-identity principalId must be a GUID.'
 }
 
 $idpInputBucket = ''
@@ -113,65 +104,114 @@ $idpWorkingBucket = ''
 $idpOutputBucket = ''
 $idpKeyArn = ''
 $idpStateMachineArn = ''
-$idpOutputs = Try-GetOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.idpStackName
-if ($idpOutputs.Count -gt 0) {
-    $idpInputBucket = [string]$idpOutputs.S3InputBucketName
-    $idpOutputBucket = [string]$idpOutputs.S3OutputBucketName
-    $idpKeyArn = [string]$idpOutputs.CustomerManagedEncryptionKeyArn
-    $idpStateMachineArn = [string]$idpOutputs.StateMachineArn
-    try {
-        $working = Invoke-Aws -Profile $config.awsProfile -Region $config.awsRegion -Arguments @(
-            'cloudformation', 'describe-stack-resource',
-            '--stack-name', $config.idpStackName,
-            '--logical-resource-id', 'WorkingBucket'
-        ) -CaptureJson
-        $idpWorkingBucket = [string]$working.StackResourceDetail.PhysicalResourceId
-    } catch {
-        throw "IDP stack exists but WorkingBucket could not be resolved: $($_.Exception.Message)"
+$idpConnected = $false
+$idpStack = Get-AwsCloudFormationStackDescription `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.idpStackName `
+    -AllowMissing:$AllowMissingIdp
+if ($null -eq $idpStack) {
+    if (-not $AllowMissingIdp) {
+        throw "Required IDP stack '$($config.idpStackName)' does not exist."
     }
+
+    $existingPlatformStack = Get-AwsCloudFormationStackDescription `
+        -Profile $config.awsProfile `
+        -Region $config.awsRegion `
+        -StackName $config.platformStackName `
+        -AllowMissing
+    if ($null -ne $existingPlatformStack) {
+        $existingPlatformParameters = Get-StackParameterMap -Stack $existingPlatformStack
+        $hasExistingIdpWiring = $false
+        foreach ($parameterName in @(
+            'IdpInputBucketName',
+            'IdpWorkingBucketName',
+            'IdpOutputBucketName',
+            'IdpInputKeyArn',
+            'IdpStateMachineArn'
+        )) {
+            if ($existingPlatformParameters.ContainsKey($parameterName) -and
+                -not [string]::IsNullOrWhiteSpace([string]$existingPlatformParameters[$parameterName])) {
+                $hasExistingIdpWiring = $true
+                break
+            }
+        }
+        if ($hasExistingIdpWiring) {
+            throw "IDP stack '$($config.idpStackName)' is missing, but platform stack '$($config.platformStackName)' is connected. Refusing to erase the last known IDP wiring."
+        }
+    }
+    Write-Host 'The explicit first-install bootstrap pass will deploy processors without IDP resources.'
+} else {
+    $idpOutputs = Get-StackOutputMap -Stack $idpStack
+    $idpInputBucket = Require-Output -Outputs $idpOutputs -Name 'S3InputBucketName' -StackName $config.idpStackName
+    $idpOutputBucket = Require-Output -Outputs $idpOutputs -Name 'S3OutputBucketName' -StackName $config.idpStackName
+    $idpKeyArn = Require-Output -Outputs $idpOutputs -Name 'CustomerManagedEncryptionKeyArn' -StackName $config.idpStackName
+    $idpStateMachineArn = Require-Output -Outputs $idpOutputs -Name 'StateMachineArn' -StackName $config.idpStackName
+    $working = Invoke-Aws -Profile $config.awsProfile -Region $config.awsRegion -Arguments @(
+        'cloudformation', 'describe-stack-resource',
+        '--stack-name', $config.idpStackName,
+        '--logical-resource-id', 'WorkingBucket'
+    ) -CaptureJson
+    $idpWorkingBucket = [string]$working.StackResourceDetail.PhysicalResourceId
+    if ([string]::IsNullOrWhiteSpace($idpWorkingBucket)) {
+        throw "IDP stack '$($config.idpStackName)' has no physical WorkingBucket."
+    }
+    $idpConnected = $true
 }
 
-$manifest = Get-Content -Raw -LiteralPath (Join-Path $root 'config/idp/manifest.json') | ConvertFrom-Json -Depth 10
-$lock = Get-Content -Raw -LiteralPath (Join-Path $root 'vendor/idp.lock.json') | ConvertFrom-Json -Depth 10
+$manifest = Get-Content -Raw -LiteralPath (Join-Path $root 'config/idp/manifest.json') |
+    ConvertFrom-Json -Depth 10
+$lock = Get-Content -Raw -LiteralPath (Join-Path $root 'vendor/idp.lock.json') |
+    ConvertFrom-Json -Depth 10
+if ([string]$lock.deploymentMode -ne 'headless') {
+    throw 'The private AWS runtime requires the pinned IDP deploymentMode to remain headless.'
+}
+
 $deployDirectory = Join-Path $root ".local/deploy/$($config.environment)/platform"
-[IO.Directory]::CreateDirectory($deployDirectory) | Out-Null
+[System.IO.Directory]::CreateDirectory($deployDirectory) | Out-Null
 $builtTemplate = Join-Path $deployDirectory 'built/template.yaml'
 $packagedTemplate = Join-Path $deployDirectory 'packaged.yaml'
+$stackPolicyPath = Join-Path $root 'infra/stack-policies/protect-stateful-resources.json'
 
 if (-not $SkipBuild) {
-    & sam build --template-file (Join-Path $root 'infra/api/template.yaml') --build-dir (Split-Path $builtTemplate) --parallel
-    if ($LASTEXITCODE -ne 0) { throw 'SAM build failed for the regional platform.' }
+    & sam build `
+        --template-file (Join-Path $root 'infra/api/template.yaml') `
+        --build-dir (Split-Path $builtTemplate) `
+        --parallel
+    if ($LASTEXITCODE -ne 0) { throw 'SAM build failed for the private AWS runtime.' }
 }
 if (-not (Test-Path -LiteralPath $builtTemplate)) {
-    throw "Built SAM template not found at '$builtTemplate'. Remove -SkipBuild or provide a previous build."
+    throw "Built SAM template not found at '$builtTemplate'. Remove -SkipBuild or provide a prior reviewed build."
 }
 
-$samPackageArguments = @(
+$packageArguments = @(
     'package',
     '--template-file', $builtTemplate,
-    '--s3-bucket', $bootstrap.ArtifactBucketName,
+    '--s3-bucket', [string]$bootstrap.ArtifactBucketName,
     '--s3-prefix', "platform/$($config.environment)",
-    '--kms-key-id', $bootstrap.ArtifactKeyArn,
-    '--region', $config.awsRegion,
+    '--kms-key-id', [string]$bootstrap.ArtifactKeyArn,
+    '--region', [string]$config.awsRegion,
     '--output-template-file', $packagedTemplate
 )
-if ($env:GITHUB_ACTIONS -ne 'true') { $samPackageArguments += @('--profile', $config.awsProfile) }
-& sam @samPackageArguments
-if ($LASTEXITCODE -ne 0) { throw 'SAM package failed for the regional platform.' }
+if ($env:GITHUB_ACTIONS -ne 'true') { $packageArguments += @('--profile', [string]$config.awsProfile) }
+& sam @packageArguments
+if ($LASTEXITCODE -ne 0) { throw 'SAM package failed for the private AWS runtime.' }
 
-$awsBase = @('--region', $config.awsRegion, '--no-cli-pager')
-if ($env:GITHUB_ACTIONS -ne 'true') { $awsBase = @('--profile', $config.awsProfile) + $awsBase }
+$expectedIdpParameters = [ordered]@{
+    IdpInputBucketName = $idpInputBucket
+    IdpWorkingBucketName = $idpWorkingBucket
+    IdpOutputBucketName = $idpOutputBucket
+    IdpInputKeyArn = $idpKeyArn
+    IdpStateMachineArn = $idpStateMachineArn
+}
 $parameters = @(
     "EnvironmentName=$($config.environment)",
-    "HostedZoneId=$($config.route53HostedZoneId)",
     "UiHostName=$($config.uiHostName)",
-    "ApiOriginHostName=$($config.apiOriginHostName)",
-    "EntraTenantId=$entraTenantId",
-    "EntraApiAudience=$entraAudience",
-    "AllowedClientIds=$($allowedClientIds -join ',')",
-    'DeniedClientIds=',
-    "OriginVerifySecret=$secretPlain",
-    "OriginVerifySecretDigest=$secretDigest",
+    "EntraTenantId=$($config.entraTenantId)",
+    "AzureFederationAudience=$($federation.audience)",
+    "AzureFederationSubject=$federationSubject",
+    "AzureRuntimeRoleMaxSessionSeconds=$(Get-OptionalConfigValue -Config $config -Name 'azureAwsSessionDurationSeconds' -Default 3600)",
+    "RolePermissionsBoundaryArn=$($bootstrap.PlatformRolePermissionsBoundaryArn)",
     "AlertEmail=$($config.alertEmail)",
     "BudgetEmail=$($config.budgetEmail)",
     "MonthlyBudgetUsd=$($config.monthlyBudgetUsd)",
@@ -179,11 +219,11 @@ $parameters = @(
     "MaximumPdfPages=$($config.maximumPdfPages)",
     "SourceRetentionDays=$($config.sourceRetentionDays)",
     "LogRetentionDays=$($config.logRetentionDays)",
-    "IdpInputBucketName=$idpInputBucket",
-    "IdpWorkingBucketName=$idpWorkingBucket",
-    "IdpOutputBucketName=$idpOutputBucket",
-    "IdpInputKeyArn=$idpKeyArn",
-    "IdpStateMachineArn=$idpStateMachineArn",
+    "IdpInputBucketName=$($expectedIdpParameters['IdpInputBucketName'])",
+    "IdpWorkingBucketName=$($expectedIdpParameters['IdpWorkingBucketName'])",
+    "IdpOutputBucketName=$($expectedIdpParameters['IdpOutputBucketName'])",
+    "IdpInputKeyArn=$($expectedIdpParameters['IdpInputKeyArn'])",
+    "IdpStateMachineArn=$($expectedIdpParameters['IdpStateMachineArn'])",
     "ScreenConfigVersion=$($manifest.screen.name)",
     "ScreenConfigSha256=$($manifest.screen.sourceSha256)",
     "FullConfigVersion=$($manifest.full.name)",
@@ -195,8 +235,8 @@ $parameters = @(
 $deployArguments = @(
     'cloudformation', 'deploy',
     '--template-file', $packagedTemplate,
-    '--stack-name', $config.platformStackName,
-    '--role-arn', $bootstrap.CloudFormationExecutionRoleArn,
+    '--stack-name', [string]$config.platformStackName,
+    '--role-arn', [string]$bootstrap.PlatformCloudFormationExecutionRoleArn,
     '--capabilities', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND',
     '--parameter-overrides'
 ) + $parameters + @(
@@ -206,32 +246,100 @@ $deployArguments = @(
     'ManagedBy=CloudFormation',
     '--no-fail-on-empty-changeset'
 )
-
-try {
-    Invoke-AwsRedacted -BaseArguments $awsBase -Arguments $deployArguments -FailureMessage 'Regional platform deployment failed; secret-bearing arguments were redacted.'
-} finally {
-    $secretPlain = $null
-    $parameters = $null
-    $deployArguments = $null
+$platformBeforeDeployment = Get-AwsCloudFormationStackDescription `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.platformStackName `
+    -AllowMissing
+if ($null -ne $platformBeforeDeployment) {
+    Set-AwsStatefulStackPolicy `
+        -Profile $config.awsProfile `
+        -Region $config.awsRegion `
+        -StackName $config.platformStackName `
+        -PolicyPath $stackPolicyPath
 }
 
-$outputs = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.platformStackName
-if ($outputs.OriginVerifySecretDigest -ne $secretDigest) {
-    throw 'Regional stack deployed, but its origin-secret digest does not match the requested value.'
+Invoke-Aws `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -Arguments $deployArguments | Out-Host
+
+Set-AwsStatefulStackPolicy `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.platformStackName `
+    -PolicyPath $stackPolicyPath
+
+$deployedPlatformStack = Get-AwsCloudFormationStackDescription `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.platformStackName
+$deployedPlatformParameters = Get-StackParameterMap -Stack $deployedPlatformStack
+foreach ($parameterName in $expectedIdpParameters.Keys) {
+    if (-not $deployedPlatformParameters.ContainsKey([string]$parameterName)) {
+        throw "Deployed platform stack is missing required IDP parameter '$parameterName'."
+    }
+    if (-not [string]::Equals(
+        [string]$deployedPlatformParameters[[string]$parameterName],
+        [string]$expectedIdpParameters[$parameterName],
+        [StringComparison]::Ordinal
+    )) {
+        throw "Deployed platform IDP parameter '$parameterName' does not match the discovered IDP stack value."
+    }
 }
+
+$verifiedIdpConnected = $false
+if ($idpConnected) {
+    foreach ($logicalResourceId in 'IdpFailureRule', 'IdpExecutionWatchdogRule') {
+        $resource = Invoke-Aws -Profile $config.awsProfile -Region $config.awsRegion -Arguments @(
+            'cloudformation', 'describe-stack-resource',
+            '--stack-name', $config.platformStackName,
+            '--logical-resource-id', $logicalResourceId
+        ) -CaptureJson
+        if ([string]::IsNullOrWhiteSpace([string]$resource.StackResourceDetail.PhysicalResourceId)) {
+            throw "Deployed platform stack did not create required IDP integration resource '$logicalResourceId'."
+        }
+    }
+    $verifiedIdpConnected = $true
+}
+
+$outputs = Get-StackOutputs `
+    -Profile $config.awsProfile `
+    -Region $config.awsRegion `
+    -StackName $config.platformStackName
+foreach ($requiredOutput in @(
+    'SourceBucketName',
+    'DataKeyArn',
+    'RegistryTableName',
+    'UploadProcessorFunctionArn',
+    'IdpPostprocessorFunctionArn',
+    'AzureApiRuntimeRoleArn',
+    'EntraTenantOidcProviderArn'
+)) {
+    Require-Output -Outputs $outputs -Name $requiredOutput -StackName $config.platformStackName | Out-Null
+}
+
 $localDirectory = Join-Path $root '.local'
-[IO.Directory]::CreateDirectory($localDirectory) | Out-Null
+[System.IO.Directory]::CreateDirectory($localDirectory) | Out-Null
 $outputPath = Join-Path $localDirectory "aws-$($config.environment).json"
 $safeOutput = [ordered]@{
-    region = $config.awsRegion
-    stackName = $config.platformStackName
-    apiOriginUrl = $outputs.ApiOriginUrl
-    sourceBucketName = $outputs.SourceBucketName
-    registryTableName = $outputs.RegistryTableName
-    uploadProcessorFunctionArn = $outputs.UploadProcessorFunctionArn
-    idpPostprocessorFunctionArn = $outputs.IdpPostprocessorFunctionArn
-    idpConnected = [bool]$idpInputBucket
-    originVerifySecretDigest = $outputs.OriginVerifySecretDigest
+    schemaVersion = 1
+    region = [string]$config.awsRegion
+    stackName = [string]$config.platformStackName
+    sourceBucketName = [string]$outputs.SourceBucketName
+    dataKeyArn = [string]$outputs.DataKeyArn
+    registryTableName = [string]$outputs.RegistryTableName
+    uploadProcessorFunctionArn = [string]$outputs.UploadProcessorFunctionArn
+    idpPostprocessorFunctionArn = [string]$outputs.IdpPostprocessorFunctionArn
+    azureApiRuntimeRoleArn = [string]$outputs.AzureApiRuntimeRoleArn
+    entraTenantOidcProviderArn = [string]$outputs.EntraTenantOidcProviderArn
+    federationAudience = [string]$federation.audience
+    federationSubject = $federationSubject
+    idpConnected = $verifiedIdpConnected
 }
-[IO.File]::WriteAllText($outputPath, ($safeOutput | ConvertTo-Json -Depth 10) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
-Write-Host "Regional platform ready. Non-secret outputs: $outputPath"
+[System.IO.File]::WriteAllText(
+    $outputPath,
+    ($safeOutput | ConvertTo-Json -Depth 20) + [Environment]::NewLine,
+    [System.Text.UTF8Encoding]::new($false)
+)
+Write-Host "Private AWS runtime ready. Non-secret outputs: $outputPath"

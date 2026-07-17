@@ -1,40 +1,33 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Production regional loan document API, registry, quarantine, malware gate, and processing hooks.
+Description: Private AWS registry, quarantine, malware gate, processing hooks, and Azure workload federation for the loan document platform.
 
 Parameters:
   EnvironmentName:
     Type: String
     Default: prod
     AllowedPattern: '[a-z0-9-]+'
-  HostedZoneId:
-    Type: AWS::Route53::HostedZone::Id
   UiHostName:
-    Type: String
-  ApiOriginHostName:
     Type: String
   EntraTenantId:
     Type: String
     AllowedPattern: '[0-9a-fA-F-]{36}'
-  EntraApiAudience:
+  AzureFederationAudience:
+    Type: String
+    AllowedPattern: 'api://[0-9a-fA-F-]{36}'
+    Description: Dedicated Entra Application ID URI accepted only for Azure-to-AWS workload federation.
+  AzureFederationSubject:
     Type: String
     AllowedPattern: '[0-9a-fA-F-]{36}'
-  AllowedClientIds:
+    Description: Object/principal ID of the Azure API user-assigned managed identity.
+  AzureRuntimeRoleMaxSessionSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 3600
+    MaxValue: 43200
+  RolePermissionsBoundaryArn:
     Type: String
-    Description: Comma-delimited Entra client application IDs accepted by the Lambda authorization layer.
-  DeniedClientIds:
-    Type: String
-    Default: ''
-  OriginVerifySecret:
-    Type: String
-    NoEcho: true
-    MinLength: 32
-    MaxLength: 256
-    Description: High-entropy value supplied at deployment time and shared only with the API CloudFront origin.
-  OriginVerifySecretDigest:
-    Type: String
-    AllowedPattern: '[0-9a-f]{64}'
-    Description: Non-secret SHA-256 digest used to detect uncoordinated origin-secret changes.
+    AllowedPattern: 'arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+'
   AlertEmail:
     Type: String
     AllowedPattern: '[^@]+@[^@]+\.[^@]+'
@@ -338,6 +331,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub 'loan-document-${EnvironmentName}-guardduty-malware'
+      PermissionsBoundary: !Ref RolePermissionsBoundaryArn
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -421,29 +415,55 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  LoanApiRole:
+  EntraTenantOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !Sub 'https://sts.windows.net/${EntraTenantId}/'
+      ClientIdList:
+        - !Ref AzureFederationAudience
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: azure-api-runtime-federation
+
+  AzureApiRuntimeRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'loan-document-${EnvironmentName}-loan-api'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      RoleName: !Sub 'loan-document-${EnvironmentName}-azure-api'
+      PermissionsBoundary: !Ref RolePermissionsBoundaryArn
+      Description: Exact-subject runtime role assumed only by the Azure API managed identity.
+      MaxSessionDuration: !Ref AzureRuntimeRoleMaxSessionSeconds
+      AssumeRolePolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": "${EntraTenantOidcProvider}"
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "sts.windows.net/${EntraTenantId}/:aud": "${AzureFederationAudience}",
+                  "sts.windows.net/${EntraTenantId}/:sub": "${AzureFederationSubject}"
+                }
+              }
+            }
+          ]
+        }
       Policies:
-        - PolicyName: LoanApiDataAccess
+        - PolicyName: AzureApiDataAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: Allow
+              - Sid: RegistryAccess
+                Effect: Allow
                 Action:
                   - dynamodb:BatchGetItem
-                  - dynamodb:DeleteItem
                   - dynamodb:GetItem
                   - dynamodb:PutItem
                   - dynamodb:Query
@@ -452,23 +472,32 @@ Resources:
                 Resource:
                   - !GetAtt RegistryTable.Arn
                   - !Sub '${RegistryTable.Arn}/index/*'
-              - Effect: Allow
+              - Sid: ExactTenantObjects
+                Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:GetObjectAttributes
                   - s3:GetObjectVersion
-                  - s3:ListBucket
                   - s3:PutObject
                 Resource:
-                  - !GetAtt SourceBucket.Arn
-                  - !Sub '${SourceBucket.Arn}/*'
-              - Effect: Allow
+                  - !Sub '${SourceBucket.Arn}/quarantine/tenants/*'
+                  - !Sub '${SourceBucket.Arn}/tenants/*'
+              - Sid: UseDataKeyThroughS3
+                Effect: Allow
                 Action:
                   - kms:Decrypt
                   - kms:Encrypt
                   - kms:GenerateDataKey
                 Resource: !GetAtt DataKey.Arn
-              - Effect: Allow
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 's3.${AWS::Region}.${AWS::URLSuffix}'
+                  StringLike:
+                    kms:EncryptionContext:aws:s3:arn:
+                      - !Sub '${SourceBucket.Arn}/quarantine/tenants/*'
+                      - !Sub '${SourceBucket.Arn}/tenants/*'
+              - Sid: ReconcileCompletedUpload
+                Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !GetAtt UploadProcessorFunction.Arn
       Tags:
@@ -481,6 +510,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub 'loan-document-${EnvironmentName}-upload-processor'
+      PermissionsBoundary: !Ref RolePermissionsBoundaryArn
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -506,6 +536,14 @@ Resources:
                 Resource:
                   - !GetAtt RegistryTable.Arn
                   - !Sub '${RegistryTable.Arn}/index/*'
+              - Sid: ReadUploadCompletionStream
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !GetAtt RegistryTable.StreamArn
               - Effect: Allow
                 Action:
                   - s3:GetObject
@@ -546,6 +584,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub 'loan-document-${EnvironmentName}-idp-postprocessor'
+      PermissionsBoundary: !Ref RolePermissionsBoundaryArn
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -637,31 +676,6 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  LoanApiFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub 'loan-document-${EnvironmentName}-api'
-      CodeUri: ../../services/loan_api
-      Handler: app.lambda_handler
-      Role: !GetAtt LoanApiRole.Arn
-      MemorySize: 1024
-      Timeout: 30
-      ReservedConcurrentExecutions: 40
-      Environment:
-        Variables:
-          TABLE_NAME: !Ref RegistryTable
-          SOURCE_BUCKET: !Ref SourceBucket
-          DATA_KEY_ARN: !GetAtt DataKey.Arn
-          ENTRA_TENANT_ID: !Ref EntraTenantId
-          ORIGIN_VERIFY_SECRET: !Ref OriginVerifySecret
-          ALLOWED_CLIENT_IDS: !Ref AllowedClientIds
-          DENIED_CLIENT_IDS: !Ref DeniedClientIds
-          REQUIRE_USER_ROLES: 'true'
-          MAXIMUM_UPLOAD_BYTES: !Ref MaximumUploadBytes
-          UPLOAD_URL_SECONDS: '600'
-          DOWNLOAD_URL_SECONDS: '120'
-          UPLOAD_PROCESSOR_ARN: !GetAtt UploadProcessorFunction.Arn
-
   UploadProcessorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -686,6 +700,27 @@ Resources:
           SELECTOR_RULE_VERSION: !Ref SelectorRuleVersion
           MAXIMUM_UPLOAD_BYTES: !Ref MaximumUploadBytes
           MAXIMUM_PDF_PAGES: !Ref MaximumPdfPages
+
+  UploadCompletionStreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      BisectBatchOnFunctionError: true
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt UploadProcessorDlq.Arn
+      Enabled: true
+      EventSourceArn: !GetAtt RegistryTable.StreamArn
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT","MODIFY"],"dynamodb":{"NewImage":{"entityType":{"S":["UPLOAD"]},"status":{"S":["VALIDATING"]}}}}}'
+      FunctionName: !Ref UploadProcessorFunction
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      MaximumRecordAgeInSeconds: 3600
+      MaximumRetryAttempts: 5
+      ParallelizationFactor: 1
+      StartingPosition: TRIM_HORIZON
 
   IdpPostprocessorFunction:
     Type: AWS::Serverless::Function
@@ -756,6 +791,8 @@ Resources:
           s3ObjectDetails:
             bucketName:
               - !Ref SourceBucket
+            objectKey:
+              - prefix: quarantine/tenants/
       State: ENABLED
       Targets:
         - Arn: !GetAtt UploadProcessorFunction.Arn
@@ -881,24 +918,6 @@ Resources:
               ArnEquals:
                 aws:SourceArn: !GetAtt IdpExecutionWatchdogRule.Arn
 
-  ApiAccessLogGroup:
-    Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      LogGroupName: !Sub '/aws/apigateway/loan-document-${EnvironmentName}'
-      RetentionInDays: !Ref LogRetentionDays
-      KmsKeyId: !GetAtt DataKey.Arn
-
-  LoanApiLogGroup:
-    Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      LogGroupName: !Sub '/aws/lambda/${LoanApiFunction}'
-      RetentionInDays: !Ref LogRetentionDays
-      KmsKeyId: !GetAtt DataKey.Arn
-
   UploadProcessorLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
@@ -917,165 +936,11 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
       KmsKeyId: !GetAtt DataKey.Arn
 
-  HttpApi:
-    Type: AWS::ApiGatewayV2::Api
-    Properties:
-      Name: !Sub 'loan-document-${EnvironmentName}'
-      ProtocolType: HTTP
-      DisableExecuteApiEndpoint: true
-      CorsConfiguration:
-        AllowCredentials: false
-        AllowHeaders:
-          - Authorization
-          - Content-Type
-          - Idempotency-Key
-          - X-Correlation-Id
-        AllowMethods:
-          - GET
-          - POST
-          - OPTIONS
-        AllowOrigins:
-          - !Sub 'https://${UiHostName}'
-        ExposeHeaders:
-          - Content-Disposition
-          - X-Correlation-Id
-        MaxAge: 600
-      Tags:
-        Application: loan-document-platform
-        Environment: !Ref EnvironmentName
-
-  EntraJwtAuthorizer:
-    Type: AWS::ApiGatewayV2::Authorizer
-    Properties:
-      ApiId: !Ref HttpApi
-      AuthorizerType: JWT
-      IdentitySource:
-        - '$request.header.Authorization'
-      JwtConfiguration:
-        Audience:
-          - !Ref EntraApiAudience
-        Issuer: !Sub 'https://login.microsoftonline.com/${EntraTenantId}/v2.0'
-      Name: entra-jwt
-
-  ApiIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref HttpApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt LoanApiFunction.Arn
-      PayloadFormatVersion: '2.0'
-      TimeoutInMillis: 29000
-
-  AuthenticatedDefaultRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: '$default'
-      AuthorizationType: JWT
-      AuthorizerId: !Ref EntraJwtAuthorizer
-      Target: !Join ['', ['integrations/', !Ref ApiIntegration]]
-
-  HealthRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: 'GET /health'
-      AuthorizationType: NONE
-      Target: !Join ['', ['integrations/', !Ref ApiIntegration]]
-
-  CorsPreflightRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: 'OPTIONS /{proxy+}'
-      AuthorizationType: NONE
-      Target: !Join ['', ['integrations/', !Ref ApiIntegration]]
-
-  ApiStage:
-    Type: AWS::ApiGatewayV2::Stage
-    Properties:
-      ApiId: !Ref HttpApi
-      StageName: '$default'
-      AutoDeploy: true
-      AccessLogSettings:
-        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
-        Format: >-
-          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage"}
-      DefaultRouteSettings:
-        DetailedMetricsEnabled: true
-        ThrottlingBurstLimit: 100
-        ThrottlingRateLimit: 50
-      Tags:
-        Application: loan-document-platform
-        Environment: !Ref EnvironmentName
-
-  ApiInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref LoanApiFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
-
-  ApiOriginCertificate:
-    Type: AWS::CertificateManager::Certificate
-    Properties:
-      DomainName: !Ref ApiOriginHostName
-      DomainValidationOptions:
-        - DomainName: !Ref ApiOriginHostName
-          HostedZoneId: !Ref HostedZoneId
-      ValidationMethod: DNS
-      Tags:
-        - Key: Application
-          Value: loan-document-platform
-        - Key: Environment
-          Value: !Ref EnvironmentName
-
-  ApiOriginDomain:
-    Type: AWS::ApiGatewayV2::DomainName
-    Properties:
-      DomainName: !Ref ApiOriginHostName
-      DomainNameConfigurations:
-        - CertificateArn: !Ref ApiOriginCertificate
-          EndpointType: REGIONAL
-          SecurityPolicy: TLS_1_2
-      Tags:
-        Application: loan-document-platform
-        Environment: !Ref EnvironmentName
-
-  ApiOriginMapping:
-    Type: AWS::ApiGatewayV2::ApiMapping
-    Properties:
-      ApiId: !Ref HttpApi
-      DomainName: !Ref ApiOriginDomain
-      Stage: !Ref ApiStage
-
-  ApiOriginIpv4Record:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref ApiOriginHostName
-      Type: A
-      AliasTarget:
-        DNSName: !GetAtt ApiOriginDomain.RegionalDomainName
-        HostedZoneId: !GetAtt ApiOriginDomain.RegionalHostedZoneId
-        EvaluateTargetHealth: false
-
-  ApiOriginIpv6Record:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref ApiOriginHostName
-      Type: AAAA
-      AliasTarget:
-        DNSName: !GetAtt ApiOriginDomain.RegionalDomainName
-        HostedZoneId: !GetAtt ApiOriginDomain.RegionalHostedZoneId
-        EvaluateTargetHealth: false
-
   BackupRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub 'loan-document-${EnvironmentName}-backup'
+      PermissionsBoundary: !Ref RolePermissionsBoundaryArn
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -1164,25 +1029,6 @@ Resources:
             - Address: !Ref BudgetEmail
               SubscriptionType: EMAIL
 
-  LoanApiErrorAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmDescription: Loan API Lambda errors.
-      Namespace: AWS/Lambda
-      MetricName: Errors
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref LoanApiFunction
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
-      AlarmActions: [!Ref AlertsTopic]
-      OKActions: [!Ref AlertsTopic]
-
   ProcessorErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -1216,27 +1062,6 @@ Resources:
           ReturnData: true
       EvaluationPeriods: 1
       DatapointsToAlarm: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
-      AlarmActions: [!Ref AlertsTopic]
-      OKActions: [!Ref AlertsTopic]
-
-  ApiServerErrorAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmDescription: HTTP API 5xx responses.
-      Namespace: AWS/ApiGateway
-      MetricName: 5xx
-      Dimensions:
-        - Name: ApiId
-          Value: !Ref HttpApi
-        - Name: Stage
-          Value: '$default'
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 2
-      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
@@ -1297,31 +1122,7 @@ Resources:
       AlarmActions: [!Ref AlertsTopic]
       OKActions: [!Ref AlertsTopic]
 
-  ApiCertificateExpiryAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmDescription: Regional API origin certificate expires within 30 days.
-      Namespace: AWS/CertificateManager
-      MetricName: DaysToExpiry
-      Dimensions:
-        - Name: CertificateArn
-          Value: !Ref ApiOriginCertificate
-      Statistic: Minimum
-      Period: 21600
-      EvaluationPeriods: 1
-      Threshold: 30
-      ComparisonOperator: LessThanThreshold
-      TreatMissingData: breaching
-      AlarmActions: [!Ref AlertsTopic]
-      OKActions: [!Ref AlertsTopic]
-
 Outputs:
-  ApiId:
-    Value: !Ref HttpApi
-  ApiOriginUrl:
-    Value: !Sub 'https://${ApiOriginHostName}'
-  ApiOriginCertificateArn:
-    Value: !Ref ApiOriginCertificate
   SourceBucketName:
     Value: !Ref SourceBucket
   DataKeyArn:
@@ -1338,6 +1139,7 @@ Outputs:
     Value: !Ref AlertsTopic
   MalwareProtectionPlanArn:
     Value: !GetAtt MalwareProtectionPlan.Arn
-  OriginVerifySecretDigest:
-    Value: !Ref OriginVerifySecretDigest
-    Description: Non-secret digest only; compare with the edge stack output before traffic cutover.
+  AzureApiRuntimeRoleArn:
+    Value: !GetAtt AzureApiRuntimeRole.Arn
+  EntraTenantOidcProviderArn:
+    Value: !Ref EntraTenantOidcProvider

@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Target React SPA, Entra authorization-code PKCE, Azure API, and private AWS data-plane flow for the Loan Document Platform.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Entra authorization code with PKCE and AWS federation — target UI flow</title>
+  <link rel="stylesheet" href="identity-flow.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to the flow</a>
+  <main id="main" class="wrap">
+    <header>
+      <p class="eyebrow">Loan Document Platform · target React UI flow</p>
+      <h1>Entra interactive sign-in across Azure and AWS</h1>
+      <p class="lede">
+        The SPA uses single-tenant authorization code with PKCE and has no secret or certificate.
+        A delegated <span class="chip chip-user">USER TOKEN</span> must contain both the route's
+        delegated <span class="mono">scp</span> value and its matching assigned
+        <span class="mono">roles</span> value. UI capability checks improve usability; the Azure API
+        remains the authoritative control plane. The browser never calls AppSync, an AWS Loan API,
+        DynamoDB, or an IDP workflow.
+      </p>
+      <nav class="page-nav" aria-label="Related flow documentation">
+        <a href="entra-certificate-api-testing-flow.html">Certificate-client test flow</a>
+        <a href="README.md">GitHub-readable flow guide</a>
+        <a href="../ui-handoff.md">Claude UI handoff</a>
+        <a href="../security.md">Security policy</a>
+        <a href="../../contracts/openapi/loan-api.yaml">OpenAPI contract</a>
+      </nav>
+    </header>
+
+    <section class="setup" aria-labelledby="ui-setup-heading">
+      <h2 id="ui-setup-heading">Browser and registration baseline</h2>
+      <ul>
+        <li>
+          Load and schema-validate <span class="mono">/runtime-config.json</span> before rendering.
+          Tenant, client, API audience, API base URL, scopes, redirect URI, and logout URI must match
+          the deployed environment; invalid configuration fails closed.
+        </li>
+        <li>
+          Register exact HTTPS redirect/logout URIs and no wildcard. Production has no localhost
+          redirect. Configure MSAL's cache location as <span class="mono">sessionStorage</span>;
+          application code does not manually persist tokens.
+        </li>
+        <li>
+          Assign users/groups the route roles they need. In production, the API requires a delegated
+          scope and the matching role. The SPA client ID is explicitly allowlisted at ingress and in
+          the application validator.
+        </li>
+        <li>
+          Restrict S3 CORS to the exact deployed SPA origin and only the methods/headers required by
+          the returned upload/download grants.
+        </li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="ui-sequence-heading">
+      <h2 id="ui-sequence-heading">Sign-in, upload, processing, and results</h2>
+      <p class="scroll-hint">On a narrow screen, focus this region and scroll horizontally to follow all four lanes.</p>
+      <div class="scroller" role="region" aria-labelledby="ui-sequence-heading" tabindex="0">
+        <div class="diagram">
+          <div class="grid actor-row" aria-hidden="true">
+            <div class="actor"><div class="name">Browser / React SPA</div><div class="role">MSAL + human user</div></div>
+            <div class="actor"><div class="name">Microsoft Entra ID</div><div class="role">interactive + workload tokens</div></div>
+            <div class="actor"><div class="name">Azure API</div><div class="role">only product control plane</div></div>
+            <div class="actor"><div class="name">Private AWS</div><div class="role">STS · DynamoDB · S3 · processors · IDP</div></div>
+          </div>
+          <div class="lifelines" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+
+          <div class="grid">
+            <div class="self-note">
+              <b>0 · App boot</b>
+              Validate runtime configuration before constructing MSAL or an API client. Preserve the
+              requested route for a post-login return.
+            </div>
+
+            <div class="msg ltr c1-2">
+              <p class="label">
+                <span class="sr-only">Browser to Microsoft Entra ID. </span><span class="n">1</span>
+                <strong>Authorize redirect:</strong> MSAL creates a PKCE verifier/challenge and state,
+                then requests the required delegated scopes. PKCE binds the authorization code to the
+                SPA instance holding the verifier.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="checkpoint">
+              <b>Entra authenticates and authorizes the user</b>
+              The configured authentication method, MFA, Conditional Access, assignment, and consent
+              run on Microsoft's origin. The SPA never sees a password or other primary credential.
+              <span class="deny"> Failure returns no authorization code or product token.</span>
+            </div>
+
+            <div class="msg rtl c1-2">
+              <p class="label">
+                <span class="sr-only">Microsoft Entra ID to browser. </span><span class="n">2</span>
+                Entra redirects to the exact registered callback with a short-lived authorization code
+                and state; MSAL validates state.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-2">
+              <p class="label">
+                <span class="sr-only">Browser to Microsoft Entra ID. </span><span class="n">3</span>
+                MSAL exchanges the authorization code plus PKCE verifier. No SPA secret or certificate
+                is involved.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg rtl c1-2">
+              <p class="label">
+                <span class="sr-only">Microsoft Entra ID to browser. </span><span class="n">4</span>
+                Short-lived <span class="chip chip-user">USER TOKEN</span> with
+                <span class="mono">aud=&lt;product-api-client-guid&gt;</span>, delegated
+                <span class="mono">scp</span>, assigned <span class="mono">roles</span>, user
+                <span class="mono">oid</span>, and <span class="mono">azp=&lt;spa-client-guid&gt;</span>.
+                MSAL owns its tab-scoped <span class="mono">sessionStorage</span> cache.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="self-note">
+              <b>5 · UI capability gate</b>
+              Show an action only when the token exposes both its scope and role. This is cosmetic;
+              never treat hidden controls as authorization.
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Browser to Azure API. </span><span class="n">6</span>
+                <strong><span class="mono">POST /v1/loans</span></strong> with Bearer token, a new
+                create-loan intent key, a correlation ID, and
+                <span class="mono">{"loanId":"23051"}</span>.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="checkpoint">
+              <b>Azure verifies the delegated caller</b>
+              Signature, exact v2 issuer and bare API GUID audience, lifetime, tenant, immutable user
+              actor, allowlisted SPA client, and the route's <span class="mono">scp</span>
+              <strong>and</strong> matching <span class="mono">roles</span> value.
+              <span class="deny"> Invalid authentication is 401; an authenticated user missing either
+              permission claim is 403.</span>
+            </div>
+
+            <div class="msg rtl c2-3">
+              <p class="label">
+                <span class="sr-only">Azure API to Microsoft Entra ID. </span><span class="n">7</span>
+                On demand, the Azure managed identity requests its separate v1
+                <span class="chip chip-workload">WORKLOAD TOKEN</span> for the dedicated federation
+                application. The user's token is never forwarded to AWS.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c3-4">
+              <p class="label">
+                <span class="sr-only">Azure API to AWS. </span><span class="n">8</span>
+                Exchange the workload token through
+                <span class="mono">AssumeRoleWithWebIdentity</span>, cache the returned
+                <span class="chip chip-aws">TEMPORARY AWS CREDENTIALS</span> in API memory, and use
+                the narrowly scoped role for the DynamoDB transaction.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="checkpoint aws-check">
+              <b>AWS verifies the Azure workload, not the user</b>
+              The OIDC provider and role trust pin the v1 issuer, federation application audience,
+              and managed-identity principal/object subject. The product token has the wrong issuer,
+              audience, and subject for this trust boundary.
+            </div>
+
+            <div class="msg rtl c1-3">
+              <p class="label">
+                <span class="sr-only">Azure API to browser. </span><span class="n">9</span>
+                <strong>201</strong> with the caller-owned <span class="mono">loanId</span> and
+                server-issued immutable <span class="mono">loanInstanceId</span>.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Browser to Azure API. </span><span class="n">10</span>
+                Compute Base64 SHA-256, then
+                <strong><span class="mono">POST /v1/loans/23051/documents</span></strong> with file
+                name, PDF content type, byte size, checksum, and a new create-document intent key.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg rtl c1-3">
+              <p class="label">
+                <span class="sr-only">Azure API to browser. </span><span class="n">11</span>
+                <strong>201</strong> with stable <span class="mono">documentId</span>, physical
+                <span class="mono">uploadId</span>, <span class="mono">AWAITING_UPLOAD</span>, expiry,
+                and an exact constrained <span class="chip chip-grant">PRESIGNED POST</span>. No AWS
+                credentials are exposed.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-4">
+              <p class="label">
+                <span class="sr-only">Browser directly to Amazon S3. </span><span class="n">12</span>
+                Multipart POST every returned field, append the PDF last, and show progress. Send
+                <strong>no Entra bearer token</strong>; the signed form and exact-origin CORS govern
+                this one S3 operation.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Browser to Azure API. </span><span class="n">13</span>
+                <strong><span class="mono">POST .../uploads/{uploadId}/complete</span></strong> with a
+                new completion-intent key and empty body. If completion times out, reuse this
+                completion key and offer <em>Retry completion</em>—never upload the PDF again. The
+                create-document key is different.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="async-note">
+              <b>Asynchronous processing:</b>
+              S3 object creation and completion may arrive in either order. Only the exact pinned,
+              client-complete, malware-clean version advances through validation, text-only screening,
+              deterministic CD selection, selected-page materialization, and full extraction. Persisted
+              normal states are
+              <span class="mono">AWAITING_UPLOAD → VALIDATING → QUEUED → SCREENING → EXTRACTING → SUCCEEDED</span>;
+              terminal alternatives are <span class="mono">HOLD</span>,
+              <span class="mono">REJECTED</span>, and <span class="mono">FAILED</span>.
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Browser to Azure API. </span><span class="n">14</span>
+                Poll <span class="mono">GET .../documents/{documentId}</span> near two seconds,
+                back off to 15 seconds, pause while hidden, resume on focus, abort on navigation, and
+                stop on a terminal state. Call <span class="mono">acquireTokenSilent</span> before API
+                requests as needed.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-3">
+              <p class="label">
+                <span class="sr-only">Browser to Azure API. </span><span class="n">15</span>
+                Render bounded inline data points as escaped read-only JSON, or request a fresh
+                source/selected/data-points download grant. The API rechecks
+                <span class="mono">Document.Read</span> or <span class="mono">DataPoints.Read</span>.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg rtl c1-3">
+              <p class="label">
+                <span class="sr-only">Azure API to browser. </span><span class="n">16</span>
+                <span class="chip chip-grant">DOWNLOAD GRANT</span> for one exact S3 object version,
+                with <span class="mono">expiresAt</span> and a <span class="mono">no-store</span>
+                download response policy.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+
+            <div class="msg ltr c1-4">
+              <p class="label">
+                <span class="sr-only">Browser directly to Amazon S3. </span><span class="n">17</span>
+                Open or save the requested artifact directly from S3 without an Entra token. The
+                signed URL remains reusable until expiry; use <span class="mono">noopener,noreferrer</span>
+                for a new browsing context, and request a fresh grant for a later download.
+              </p>
+              <div class="arrow" aria-hidden="true"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="ui-lifecycle-heading">
+      <h2 id="ui-lifecycle-heading">Archive and replacement experience</h2>
+      <div class="lifecycle-grid">
+        <article class="card">
+          <h3>Archive a document version</h3>
+          <p>
+            Confirm read-only semantics, then submit a distinct document-archive intent. The first
+            immutable snapshot is displayed as <span class="mono">documentId_001</span>. A replacement
+            retains the stable <span class="mono">documentId</span>, receives a new
+            <span class="mono">uploadId</span>, and can later become <span class="mono">_002</span>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Archive the active loan</h3>
+          <p>
+            Explain that all owned documents are included. A processing or incomplete document blocks
+            the operation with <span class="mono">409</span>. Success creates a logical immutable
+            manifest; it does not move S3 objects. The first display alias is
+            <span class="mono">23051_001</span>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Recreate the base loan ID</h3>
+          <p>
+            Creating <span class="mono">23051</span> after archive returns a new
+            <span class="mono">loanInstanceId</span>. Its eventual archive is
+            <span class="mono">23051_002</span>; current and archived instances remain separately
+            addressable.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="notes" aria-labelledby="ui-notes-heading">
+      <h2 id="ui-notes-heading">UI security and resilience details</h2>
+      <ul>
+        <li>
+          <strong>Token renewal:</strong> call <span class="mono">acquireTokenSilent</span> before
+          protected requests. On 401, force a fresh acquisition and retry once. If MSAL reports
+          <span class="mono">interaction_required</span>, redirect and return to the requested route.
+          SPA code never directly handles a refresh token.
+        </li>
+        <li>
+          <strong>Idempotency:</strong> create one key per user intent, disable double submission,
+          and reuse only that operation's key across timeout/offline/5xx retry. A genuinely new action
+          receives a new key.
+        </li>
+        <li>
+          <strong>Storage:</strong> MSAL alone owns its tab-scoped
+          <span class="mono">sessionStorage</span> token cache. App code does not persist tokens,
+          grants, PDFs, or data points in <span class="mono">localStorage</span>, IndexedDB, service
+          workers, logs, analytics, or error telemetry. A user-requested browser download is intentional.
+        </li>
+        <li>
+          <strong>Audit:</strong> <span class="mono">createdBy</span>,
+          <span class="mono">archivedBy</span>, and idempotency ownership use the validated immutable
+          Entra <span class="mono">oid</span>. A correlation ID joins sanitized diagnostics; it does
+          not identify a person by itself.
+        </li>
+        <li>
+          <strong>Accessibility:</strong> status is never color-only; all actions are keyboard
+          reachable; focus, labels, live regions, validation, and confirmation copy meet WCAG 2.2 AA.
+        </li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

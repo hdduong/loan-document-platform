@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$EnvironmentFile
+    [Parameter(Mandatory)][string]$EnvironmentFile,
+    [string]$OutputFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,7 +30,10 @@ function Invoke-Graph {
         [Parameter(Mandatory)][string]$Uri,
         [object]$Body
     )
-    $arguments = @('rest', '--method', $Method, '--uri', $Uri, '--resource-type', 'ms-graph', '--output', 'json')
+    $arguments = @(
+        'rest', '--method', $Method, '--uri', $Uri,
+        '--resource', 'https://graph.microsoft.com/', '--output', 'json'
+    )
     if ($PSBoundParameters.ContainsKey('Body')) {
         $json = $Body | ConvertTo-Json -Depth 30 -Compress
         $arguments += @('--headers', 'Content-Type=application/json', '--body', $json)
@@ -253,9 +257,11 @@ if ([bool]$config.createServiceClient) {
     Write-Host "Registered public certificate $($certificate.Thumbprint); private key was not read or uploaded."
 }
 
-$localDirectory = Join-Path $root '.local'
-[System.IO.Directory]::CreateDirectory($localDirectory) | Out-Null
-$outputPath = Join-Path $localDirectory "entra-$($config.environment).json"
+if ([string]::IsNullOrWhiteSpace($OutputFile)) {
+    $OutputFile = Join-Path $root ".local/entra-$($config.environment).json"
+}
+$outputDirectory = Split-Path -Parent $OutputFile
+if ($outputDirectory) { [System.IO.Directory]::CreateDirectory($outputDirectory) | Out-Null }
 $output = [ordered]@{
     tenantId = $config.entraTenantId
     issuer = "https://login.microsoftonline.com/$($config.entraTenantId)/v2.0"
@@ -265,6 +271,6 @@ $output = [ordered]@{
     permissionRoleIds = $roleByValue
     permissionScopeIds = $scopeByValue
 }
-[System.IO.File]::WriteAllText($outputPath, ($output | ConvertTo-Json -Depth 20) + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
-Write-Host "Wrote non-secret Entra deployment IDs to $outputPath"
+[System.IO.File]::WriteAllText($OutputFile, ($output | ConvertTo-Json -Depth 20) + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+Write-Host "Wrote non-secret Entra deployment IDs to $OutputFile"
 Write-Host 'Production authorization requires the delegated scope and matching assigned app role.'

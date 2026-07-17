@@ -1,5 +1,7 @@
 # Tasks: Loan Document Platform
 
+> **Historical baseline — do not execute.** This file records the superseded AWS-hosted product API. Use the current [Azure API control-plane specification](../002-azure-api-control-plane/spec.md) and its companion files for implementation.
+
 - **Input**: [specification](spec.md), [plan](plan.md), [research](research.md), [data model](data-model.md), and [canonical contracts](contracts/README.md)
 - **Status rule**: Checked items are verifiable in this repository. Live UI/cloud/operational work stays unchecked until acceptance evidence exists.
 

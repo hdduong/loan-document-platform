@@ -1,8 +1,10 @@
-"""Entra-authorized loan/document API.
+"""Provider-neutral loan/document lifecycle service.
 
-The Lambda is intentionally dependency-light. API Gateway validates the JWT cryptographically;
-this module performs route authorization, tenant/client checks, object state transitions,
-idempotency, exact S3 version pinning, and short-lived artifact grants.
+The Azure transport validates Entra JWTs cryptographically before dispatching
+here.  This module independently enforces route claims, tenant/client policy,
+object state transitions, idempotency, exact S3 version pinning, and short-lived
+artifact grants.  A Lambda adapter remains only for bounded migration rollback;
+the production AWS template does not deploy a public Loan API.
 """
 
 from __future__ import annotations
@@ -21,9 +23,9 @@ from decimal import Decimal
 from typing import Any, Callable
 from urllib.parse import quote
 
-import boto3
 from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeSerializer
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 LOGGER = logging.getLogger()
@@ -33,7 +35,7 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 SOURCE_BUCKET = os.environ["SOURCE_BUCKET"]
 DATA_KEY_ARN = os.environ["DATA_KEY_ARN"]
 ENTRA_TENANT_ID = os.environ["ENTRA_TENANT_ID"]
-ORIGIN_VERIFY_SECRET = os.environ["ORIGIN_VERIFY_SECRET"]
+ORIGIN_VERIFY_SECRET = os.environ.get("ORIGIN_VERIFY_SECRET", "")
 ALLOWED_CLIENT_IDS = {value.strip() for value in os.environ.get("ALLOWED_CLIENT_IDS", "").split(",") if value.strip()}
 DENIED_CLIENT_IDS = {value.strip() for value in os.environ.get("DENIED_CLIENT_IDS", "").split(",") if value.strip()}
 REQUIRE_USER_ROLES = os.environ.get("REQUIRE_USER_ROLES", "true").lower() == "true"
@@ -41,14 +43,32 @@ REQUIRE_CLIENT_ALLOWLIST = os.environ.get("REQUIRE_CLIENT_ALLOWLIST", "true").lo
 MAXIMUM_UPLOAD_BYTES = int(os.environ.get("MAXIMUM_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 UPLOAD_URL_SECONDS = int(os.environ.get("UPLOAD_URL_SECONDS", "600"))
 DOWNLOAD_URL_SECONDS = int(os.environ.get("DOWNLOAD_URL_SECONDS", "120"))
-UPLOAD_PROCESSOR_ARN = os.environ.get("UPLOAD_PROCESSOR_ARN", "")
+MAXIMUM_INLINE_DATA_POINTS_BYTES = int(
+    os.environ.get("MAXIMUM_INLINE_DATA_POINTS_BYTES", str(5 * 1024 * 1024))
+)
+MAXIMUM_QUERY_ITEMS = int(os.environ.get("MAXIMUM_QUERY_ITEMS", "5000"))
+MAXIMUM_LOAN_ARCHIVE_DOCUMENTS = int(os.environ.get("MAXIMUM_LOAN_ARCHIVE_DOCUMENTS", "500"))
+MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES = int(
+    os.environ.get("MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES", str(4 * 1024 * 1024))
+)
+UPLOAD_PROCESSOR_ARN = os.environ["UPLOAD_PROCESSOR_ARN"]
 
-DDB = boto3.resource("dynamodb")
-TABLE = DDB.Table(TABLE_NAME)
-DDB_CLIENT = boto3.client("dynamodb")
-S3 = boto3.client("s3")
-LAMBDA = boto3.client("lambda")
+AWS_CLIENT_CONFIG = Config(
+    connect_timeout=3,
+    read_timeout=10,
+    retries={"mode": "standard", "total_max_attempts": 3},
+    tcp_keepalive=True,
+)
+# The Azure host is the only production credential boundary. Importing this
+# module must never consult ambient AWS credentials or initialize a network
+# client; configure_aws_session binds every data-plane dependency per request.
+DDB: Any | None = None
+TABLE: Any | None = None
+DDB_CLIENT: Any | None = None
+S3: Any | None = None
+LAMBDA: Any | None = None
 SERIALIZER = TypeSerializer()
+CREDENTIAL_EXPIRY_PROVIDER: Callable[[], datetime | None] | None = None
 
 LOAN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 UUID_KEY_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -73,6 +93,83 @@ class ApiProblem(Exception):
         self.code = code
         self.title = title
         self.detail = detail or title
+
+
+def validate_runtime_configuration() -> None:
+    """Fail readiness when required private data-plane coordinates are unsafe."""
+
+    if not TABLE_NAME or not SOURCE_BUCKET:
+        raise RuntimeError("AWS_DATA_PLANE_CONFIGURATION_INVALID")
+    if not re.fullmatch(r"arn:(?:aws|aws-us-gov):kms:[a-z0-9-]+:\d{12}:key/[A-Za-z0-9-]+", DATA_KEY_ARN):
+        raise RuntimeError("AWS_KMS_CONFIGURATION_INVALID")
+    if not re.fullmatch(
+        r"arn:(?:aws|aws-us-gov):lambda:[a-z0-9-]+:\d{12}:function:[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?",
+        UPLOAD_PROCESSOR_ARN,
+    ):
+        raise RuntimeError("UPLOAD_PROCESSOR_CONFIGURATION_INVALID")
+    if UPLOAD_URL_SECONDS < 60 or DOWNLOAD_URL_SECONDS < 30:
+        raise RuntimeError("SIGNED_GRANT_CONFIGURATION_INVALID")
+    if MAXIMUM_UPLOAD_BYTES < 1024 or MAXIMUM_INLINE_DATA_POINTS_BYTES < 1024:
+        raise RuntimeError("REQUEST_LIMIT_CONFIGURATION_INVALID")
+    if not 100 <= MAXIMUM_QUERY_ITEMS <= 100_000:
+        raise RuntimeError("QUERY_LIMIT_CONFIGURATION_INVALID")
+    if not 1 <= MAXIMUM_LOAN_ARCHIVE_DOCUMENTS <= 5_000:
+        raise RuntimeError("LOAN_ARCHIVE_DOCUMENT_LIMIT_CONFIGURATION_INVALID")
+    if MAXIMUM_LOAN_ARCHIVE_DOCUMENTS > MAXIMUM_QUERY_ITEMS:
+        raise RuntimeError("LOAN_ARCHIVE_DOCUMENT_LIMIT_CONFIGURATION_INVALID")
+    if not 1024 <= MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES <= 20 * 1024 * 1024:
+        raise RuntimeError("LOAN_ARCHIVE_MANIFEST_LIMIT_CONFIGURATION_INVALID")
+
+
+def configure_aws_session(
+    session: Any,
+    credential_expiry_provider: Callable[[], datetime | None] | None = None,
+    *,
+    credential_expiration: datetime | None = None,
+) -> None:
+    """Bind refreshable AWS clients supplied by the hosting runtime.
+
+    The Azure host installs a botocore refreshable-credentials session during
+    application startup. Tests may inject an isolated fake session. No caller
+    token or static credential is accepted by this boundary.
+    """
+
+    if credential_expiry_provider is not None and credential_expiration is not None:
+        raise ValueError("Provide either credential_expiry_provider or credential_expiration")
+    if credential_expiration is not None:
+        if credential_expiration.tzinfo is None:
+            raise ValueError("credential_expiration must be timezone-aware")
+
+        def fixed_expiration() -> datetime:
+            return credential_expiration
+
+        credential_expiry_provider = fixed_expiration
+
+    global DDB, TABLE, DDB_CLIENT, S3, LAMBDA, CREDENTIAL_EXPIRY_PROVIDER
+    DDB = session.resource("dynamodb", config=AWS_CLIENT_CONFIG)
+    TABLE = DDB.Table(TABLE_NAME)
+    DDB_CLIENT = session.client("dynamodb", config=AWS_CLIENT_CONFIG)
+    S3 = session.client("s3", config=AWS_CLIENT_CONFIG)
+    LAMBDA = session.client("lambda", config=AWS_CLIENT_CONFIG)
+    CREDENTIAL_EXPIRY_PROVIDER = credential_expiry_provider
+
+
+def effective_grant_seconds(configured_seconds: int) -> int:
+    """Cap a signed grant to the remaining temporary credential lifetime."""
+
+    if configured_seconds < 1:
+        raise ApiProblem(503, "GRANT_CONFIGURATION_ERROR", "Signed grant configuration is invalid")
+    if CREDENTIAL_EXPIRY_PROVIDER is None:
+        return configured_seconds
+    expiry = CREDENTIAL_EXPIRY_PROVIDER()
+    if expiry is None:
+        raise ApiProblem(503, "AWS_CREDENTIALS_UNAVAILABLE", "AWS credentials are unavailable")
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    remaining = int((expiry.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()) - 30
+    if remaining < 30:
+        raise ApiProblem(503, "AWS_CREDENTIALS_EXPIRING", "AWS credentials cannot safely sign a grant")
+    return min(configured_seconds, remaining)
 
 
 def utc_now() -> str:
@@ -120,7 +217,7 @@ def problem_response(problem: ApiProblem, correlation_id: str) -> dict[str, Any]
 
 
 def header_value(event: dict[str, Any], name: str) -> str:
-    """Return an API Gateway header without relying on header-name casing."""
+    """Return a request header without relying on header-name casing."""
     expected = name.casefold()
     for key, value in (event.get("headers") or {}).items():
         if str(key).casefold() == expected:
@@ -277,12 +374,21 @@ def parse_archive_sequence(value: str) -> int:
 
 
 def query_all(**kwargs: Any) -> list[dict[str, Any]]:
-    """Read every DynamoDB query page; archive correctness cannot stop at 1 MiB."""
+    """Read DynamoDB query pages without allowing an unbounded partition load."""
     items: list[dict[str, Any]] = []
     request = dict(kwargs)
     while True:
         page = TABLE.query(**request)
-        items.extend(page.get("Items", []))
+        page_items = page.get("Items", [])
+        if not isinstance(page_items, list):
+            raise ApiProblem(503, "AWS_DATA_INVALID", "Registry query returned an invalid response")
+        if len(items) + len(page_items) > MAXIMUM_QUERY_ITEMS:
+            raise ApiProblem(
+                409,
+                "QUERY_RESULT_LIMIT_EXCEEDED",
+                "Resource contains too many registry records to process safely",
+            )
+        items.extend(page_items)
         last_key = page.get("LastEvaluatedKey")
         if not last_key:
             return items
@@ -493,7 +599,8 @@ def validate_upload_request(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_presigned_upload(key: str, metadata: dict[str, str], request: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=UPLOAD_URL_SECONDS)).isoformat().replace("+00:00", "Z")
+    grant_seconds = effective_grant_seconds(UPLOAD_URL_SECONDS)
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=grant_seconds)).isoformat().replace("+00:00", "Z")
     fields = {
         "Content-Type": "application/pdf",
         "x-amz-checksum-sha256": request["checksumSha256"],
@@ -516,9 +623,95 @@ def create_presigned_upload(key: str, metadata: dict[str, str], request: dict[st
         Key=key,
         Fields=fields,
         Conditions=conditions,
-        ExpiresIn=UPLOAD_URL_SECONDS,
+        ExpiresIn=grant_seconds,
     )
     return {"method": "POST", "url": presigned["url"], "fields": presigned["fields"]}, expires_at
+
+
+def renew_idempotent_upload_session(
+    replay: dict[str, Any],
+    auth: dict[str, str],
+    loan_id: str,
+    request: dict[str, Any],
+    cid: str,
+) -> dict[str, Any]:
+    """Mint a new grant for a stable replay without persisting signed fields."""
+
+    stable = replay.get("body")
+    if not isinstance(stable, dict) or any(
+        not stable.get(name) for name in ("loanId", "documentId", "uploadId")
+    ):
+        raise ApiProblem(500, "IDEMPOTENCY_RECORD_INVALID", "Stored upload identity is invalid")
+    if stable["loanId"] != loan_id:
+        raise ApiProblem(500, "IDEMPOTENCY_RECORD_INVALID", "Stored upload identity is invalid")
+
+    document_id = require_path_id(str(stable["documentId"]), DOCUMENT_ID_RE, "documentId")
+    upload_id = require_path_id(str(stable["uploadId"]), UPLOAD_ID_RE, "uploadId")
+    pk = loan_pk(auth["tenantId"], loan_id)
+    _, instance_id = require_active_instance(pk)
+    document = TABLE.get_item(
+        Key={"PK": pk, "SK": document_sk(instance_id, document_id)},
+        ConsistentRead=True,
+    ).get("Item")
+    upload_item_key = {"PK": pk, "SK": upload_sk(instance_id, document_id, upload_id)}
+    upload_item = TABLE.get_item(Key=upload_item_key, ConsistentRead=True).get("Item")
+    if (
+        not document
+        or not upload_item
+        or document.get("currentUploadId") != upload_id
+        or document.get("status") != "AWAITING_UPLOAD"
+        or upload_item.get("status") != "AWAITING_UPLOAD"
+    ):
+        raise ApiProblem(
+            409,
+            "UPLOAD_SESSION_NO_LONGER_ACTIVE",
+            "The idempotent upload session is no longer awaiting a PDF",
+        )
+    for name in ("fileName", "contentType", "sizeBytes", "checksumSha256"):
+        if upload_item.get(name) != request[name]:
+            raise ApiProblem(500, "IDEMPOTENCY_RECORD_INVALID", "Stored upload request is inconsistent")
+
+    grant, expires_at = create_presigned_upload(
+        str(upload_item["sourceKey"]),
+        {"document-id": document_id, "upload-id": upload_id, "loan-instance-id": instance_id},
+        request,
+    )
+    try:
+        TABLE.update_item(
+            Key=upload_item_key,
+            UpdateExpression="SET uploadExpiresAt=:expires, updatedAt=:now",
+            ConditionExpression="#status=:awaiting AND sourceKey=:sourceKey",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":expires": expires_at,
+                ":now": utc_now(),
+                ":awaiting": "AWAITING_UPLOAD",
+                ":sourceKey": upload_item["sourceKey"],
+            },
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            raise ApiProblem(
+                409,
+                "UPLOAD_SESSION_NO_LONGER_ACTIVE",
+                "The idempotent upload session is no longer awaiting a PDF",
+            ) from exc
+        raise
+    response = {
+        "loanId": loan_id,
+        "documentId": document_id,
+        "uploadId": upload_id,
+        "status": "AWAITING_UPLOAD",
+        "expiresAt": expires_at,
+        "upload": grant,
+    }
+    return json_response(
+        int(replay["status"]),
+        response,
+        cid,
+        {"location": f"/v1/loans/{quote(loan_id)}/documents/{document_id}"},
+    )
 
 
 def create_document(event: dict[str, Any], auth: dict[str, str], loan_id: str, cid: str, document_id: str | None = None) -> dict[str, Any]:
@@ -526,7 +719,7 @@ def create_document(event: dict[str, Any], auth: dict[str, str], loan_id: str, c
     body = validate_upload_request(parse_body(event))
     identity, request_hash, replay = replay_or_none(event, auth, body)
     if replay:
-        return json_response(replay["status"], replay["body"], cid)
+        return renew_idempotent_upload_session(replay, auth, loan_id, body, cid)
 
     pk = loan_pk(auth["tenantId"], loan_id)
     head, instance_id = require_active_instance(pk)
@@ -534,7 +727,7 @@ def create_document(event: dict[str, Any], auth: dict[str, str], loan_id: str, c
     is_replacement = document_id is not None
     document_id = require_path_id(document_id, DOCUMENT_ID_RE, "documentId") if document_id else new_id("doc")
     upload_id = new_id("upl")
-    key = f"tenants/{auth['tenantId']}/loans/{loan_id}/instances/{instance_id}/documents/{document_id}/uploads/{upload_id}/quarantine/source.pdf"
+    key = f"quarantine/tenants/{auth['tenantId']}/loans/{loan_id}/instances/{instance_id}/documents/{document_id}/uploads/{upload_id}/source.pdf"
     upload, expires_at = create_presigned_upload(
         key,
         {"document-id": document_id, "upload-id": upload_id, "loan-instance-id": instance_id},
@@ -547,6 +740,12 @@ def create_document(event: dict[str, Any], auth: dict[str, str], loan_id: str, c
         "status": "AWAITING_UPLOAD",
         "expiresAt": expires_at,
         "upload": upload,
+    }
+    stable_idempotency_response = {
+        "loanId": loan_id,
+        "documentId": document_id,
+        "uploadId": upload_id,
+        "status": "AWAITING_UPLOAD",
     }
     doc_key = {"PK": pk, "SK": document_sk(instance_id, document_id)}
     upload_item = {
@@ -614,7 +813,21 @@ def create_document(event: dict[str, Any], auth: dict[str, str], loan_id: str, c
     transactions.extend(
         [
             {"Put": {"TableName": TABLE_NAME, "Item": serialize_item(upload_item), "ConditionExpression": "attribute_not_exists(PK)"}},
-            {"Put": {"TableName": TABLE_NAME, "Item": serialize_item(idempotency_item(identity, request_hash, 201, response, now)), "ConditionExpression": "attribute_not_exists(PK)"}},
+            {
+                "Put": {
+                    "TableName": TABLE_NAME,
+                    "Item": serialize_item(
+                        idempotency_item(
+                            identity,
+                            request_hash,
+                            201,
+                            stable_idempotency_response,
+                            now,
+                        )
+                    ),
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }
+            },
         ]
     )
     try:
@@ -622,7 +835,7 @@ def create_document(event: dict[str, Any], auth: dict[str, str], loan_id: str, c
     except ApiProblem:
         replay = get_idempotent(identity, request_hash)
         if replay:
-            return json_response(replay["status"], replay["body"], cid)
+            return renew_idempotent_upload_session(replay, auth, loan_id, body, cid)
         if is_replacement:
             raise ApiProblem(409, "DOCUMENT_ACTIVE_VERSION_EXISTS", "Archive the current document version before uploading a replacement")
         raise
@@ -729,9 +942,10 @@ def complete_upload(event: dict[str, Any], auth: dict[str, str], loan_id: str, d
         except ApiProblem:
             replay = get_idempotent(identity, request_hash)
             if replay:
+                reconcile_upload_processor(auth, loan_id, document_id, upload_id)
                 return json_response(replay["status"], replay["body"], cid)
             raise
-        invoke_upload_processor_if_ready(upload)
+        reconcile_upload_processor(auth, loan_id, document_id, upload_id)
         return json_response(202, response, cid)
 
     try:
@@ -761,7 +975,18 @@ def complete_upload(event: dict[str, Any], auth: dict[str, str], loan_id: str, d
         raise ApiProblem(422, "METADATA_MISMATCH", "Uploaded object metadata does not match its upload session")
     if head.get("ServerSideEncryption") != "aws:kms" or head.get("SSEKMSKeyId") != DATA_KEY_ARN:
         raise ApiProblem(422, "ENCRYPTION_MISMATCH", "Uploaded object is not encrypted with the required KMS key")
-    prefix = S3.get_object(Bucket=upload["sourceBucket"], Key=upload["sourceKey"], VersionId=version_id, Range="bytes=0-4")["Body"].read()
+    prefix_body = S3.get_object(
+        Bucket=upload["sourceBucket"],
+        Key=upload["sourceKey"],
+        VersionId=version_id,
+        Range="bytes=0-4",
+    )["Body"]
+    try:
+        prefix = prefix_body.read()
+    finally:
+        close = getattr(prefix_body, "close", None)
+        if callable(close):
+            close()
     if not prefix.startswith(b"%PDF-"):
         raise ApiProblem(422, "INVALID_PDF", "Uploaded object does not have a PDF signature")
 
@@ -802,17 +1027,16 @@ def complete_upload(event: dict[str, Any], auth: dict[str, str], loan_id: str, d
     except ApiProblem:
         replay = get_idempotent(identity, request_hash)
         if replay:
+            reconcile_upload_processor(auth, loan_id, document_id, upload_id)
             return json_response(replay["status"], replay["body"], cid)
         raise
 
-    invoke_upload_processor_if_ready(
-        {
-            **upload,
-            "status": "VALIDATING",
-            "clientCompletedAt": now,
-            "sourceVersionId": version_id,
-        }
-    )
+    # Re-read after the transaction before using the scan summary. A clean
+    # GuardDuty event can race between the initial upload read and this commit;
+    # using that stale snapshot would leave both signals waiting on each other.
+    # DynamoDB Streams provides the durable retry path; this direct invoke is a
+    # latency optimization for the already-clean case.
+    reconcile_upload_processor(auth, loan_id, document_id, upload_id)
     return json_response(202, response, cid)
 
 
@@ -954,6 +1178,12 @@ def archive_loan(event: dict[str, Any], auth: dict[str, str], loan_id: str, cid:
     instance_prefix = f"INSTANCE#{instance_id}"
     items = query_all(KeyConditionExpression=Key("PK").eq(pk) & Key("SK").begins_with(instance_prefix), ConsistentRead=True)
     documents = [item for item in items if item.get("entityType") == "DOCUMENT"]
+    if len(documents) > MAXIMUM_LOAN_ARCHIVE_DOCUMENTS:
+        raise ApiProblem(
+            409,
+            "LOAN_ARCHIVE_DOCUMENT_LIMIT_EXCEEDED",
+            "Loan contains too many documents to archive safely",
+        )
     blocking = [item["documentId"] for item in documents if item.get("status") in BLOCKING_LOAN_ARCHIVE_STATUSES]
     if blocking:
         raise ApiProblem(409, "LOAN_HAS_PROCESSING_DOCUMENTS", f"Loan has {len(blocking)} incomplete or processing document(s)")
@@ -985,6 +1215,12 @@ def archive_loan(event: dict[str, Any], auth: dict[str, str], loan_id: str, cid:
         ],
     }
     manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(manifest_bytes) > MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES:
+        raise ApiProblem(
+            409,
+            "LOAN_ARCHIVE_MANIFEST_LIMIT_EXCEEDED",
+            "Loan archive manifest exceeds the configured size limit",
+        )
     manifest_checksum = base64.b64encode(hashlib.sha256(manifest_bytes).digest()).decode("ascii")
     manifest_key = f"tenants/{auth['tenantId']}/loans/{loan_id}/instances/{instance_id}/archives/loans/{sequence:012d}/manifest.json"
     manifest_put = S3.put_object(
@@ -1097,13 +1333,41 @@ def load_loan_archive(tenant_id: str, loan_id: str, sequence_text: str) -> tuple
         VersionId=item["manifestVersionId"],
         ChecksumMode="ENABLED",
     )
-    returned_checksum = manifest_object.get("ChecksumSHA256")
-    if returned_checksum and returned_checksum != item.get("manifestChecksumSha256"):
-        raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest checksum does not match its archive record")
+    body = manifest_object.get("Body")
+    if body is None:
+        raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest body is unavailable")
     try:
-        manifest = json.loads(manifest_object["Body"].read())
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        if not callable(getattr(body, "read", None)):
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest body is unavailable")
+        expected_checksum = item.get("manifestChecksumSha256")
+        returned_checksum = manifest_object.get("ChecksumSHA256")
+        if not isinstance(expected_checksum, str) or not expected_checksum:
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest checksum is missing")
+        if not isinstance(returned_checksum, str) or not returned_checksum:
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive storage did not return a checksum")
+        if not hmac.compare_digest(returned_checksum, expected_checksum):
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest checksum does not match its archive record")
+
+        content_length = int(manifest_object.get("ContentLength", -1))
+        if content_length > MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES:
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_TOO_LARGE", "Archive manifest exceeds the configured size limit")
+        raw_manifest = body.read(MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES + 1)
+        if not isinstance(raw_manifest, bytes):
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest body is invalid")
+        if len(raw_manifest) > MAXIMUM_LOAN_ARCHIVE_MANIFEST_BYTES:
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_TOO_LARGE", "Archive manifest exceeds the configured size limit")
+        actual_checksum = base64.b64encode(hashlib.sha256(raw_manifest).digest()).decode("ascii")
+        if not hmac.compare_digest(actual_checksum, expected_checksum):
+            raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest bytes failed checksum verification")
+        manifest = json.loads(raw_manifest)
+    except ApiProblem:
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
         raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest is invalid") from exc
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            close()
     expected_identity = {
         "tenantId": tenant_id,
         "loanId": loan_id,
@@ -1114,6 +1378,8 @@ def load_loan_archive(tenant_id: str, loan_id: str, sequence_text: str) -> tuple
         raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest identity does not match its archive record")
     if not isinstance(manifest.get("documents"), list):
         raise ApiProblem(500, "ARCHIVE_MANIFEST_INVALID", "Archive manifest documents are invalid")
+    if len(manifest["documents"]) > MAXIMUM_LOAN_ARCHIVE_DOCUMENTS:
+        raise ApiProblem(500, "ARCHIVE_MANIFEST_TOO_LARGE", "Archive manifest contains too many documents")
     document_ids: set[str] = set()
     for document in manifest["documents"]:
         if not isinstance(document, dict) or not DOCUMENT_ID_RE.fullmatch(str(document.get("documentId", ""))):
@@ -1293,7 +1559,31 @@ def read_data_points(reference: dict[str, Any] | None, status: str, cid: str) ->
         Key=reference["key"],
         VersionId=reference["versionId"],
     )
-    data = json.loads(object_["Body"].read())
+    body = object_["Body"]
+    try:
+        content_length = int(object_.get("ContentLength", -1))
+        if content_length > MAXIMUM_INLINE_DATA_POINTS_BYTES:
+            raise ApiProblem(
+                413,
+                "DATA_POINTS_TOO_LARGE",
+                "Data points are too large for an inline response; use the download endpoint",
+            )
+        raw = body.read(MAXIMUM_INLINE_DATA_POINTS_BYTES + 1)
+        if len(raw) > MAXIMUM_INLINE_DATA_POINTS_BYTES:
+            raise ApiProblem(
+                413,
+                "DATA_POINTS_TOO_LARGE",
+                "Data points are too large for an inline response; use the download endpoint",
+            )
+        data = json.loads(raw)
+    except ApiProblem:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ApiProblem(502, "DATA_POINTS_INVALID", "Pinned data points are not valid JSON") from exc
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            close()
     return json_response(200, data, cid)
 
 
@@ -1363,8 +1653,9 @@ def create_download_grant(
         "ResponseContentDisposition": f'attachment; filename="{file_name}"',
         "ResponseCacheControl": "no-store",
     }
-    url = S3.generate_presigned_url("get_object", Params=params, ExpiresIn=DOWNLOAD_URL_SECONDS)
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=DOWNLOAD_URL_SECONDS)).isoformat().replace("+00:00", "Z")
+    grant_seconds = effective_grant_seconds(DOWNLOAD_URL_SECONDS)
+    url = S3.generate_presigned_url("get_object", Params=params, ExpiresIn=grant_seconds)
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=grant_seconds)).isoformat().replace("+00:00", "Z")
     return json_response(200, {"downloadUrl": url, "fileName": file_name, "contentType": content_type, "expiresAt": expires_at}, cid)
 
 
@@ -1603,10 +1894,13 @@ ROUTES: list[tuple[str, re.Pattern[str], str, RouteHandler]] = [
 ]
 
 
-def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
+def dispatch_request(event: dict[str, Any], *, enforce_origin: bool = False) -> dict[str, Any]:
+    """Dispatch one normalized HTTP request from the Azure or rollback adapter."""
+
     cid = correlation_id(event)
     try:
-        require_origin(event)
+        if enforce_origin:
+            require_origin(event)
         path = event.get("rawPath", "")
         method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "")
         if path == "/health" and method == "GET":
@@ -1620,6 +1914,16 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     except ApiProblem as problem:
         LOGGER.info("api_problem code=%s status=%s correlation_id=%s", problem.code, problem.status, cid)
         return problem_response(problem, cid)
-    except Exception:
-        LOGGER.exception("unhandled_api_error correlation_id=%s", cid)
+    except Exception as exc:
+        LOGGER.error(
+            "unhandled_api_error error_type=%s correlation_id=%s",
+            type(exc).__name__,
+            cid,
+        )
         return problem_response(ApiProblem(500, "INTERNAL_ERROR", "Internal server error", "An unexpected error occurred"), cid)
+
+
+def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
+    """Migration rollback adapter; no production AWS resource deploys it."""
+
+    return dispatch_request(event, enforce_origin=True)

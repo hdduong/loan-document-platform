@@ -3,9 +3,13 @@ info:
   title: Loan Document Platform API
   version: 1.0.0
   description: |
-    Entra-protected API for loan lifecycle, direct document upload, IDP status,
-    immutable document/loan archives, extracted data, and artifact download grants.
-    Archive is not deletion. All mutation routes require Idempotency-Key.
+    Sole public, Entra-protected Azure API for loan lifecycle, direct document
+    upload, IDP status, immutable document/loan archives, extracted data, and
+    artifact download grants. AWS remains a private processing/data plane;
+    callers do not use an AWS Loan API or AppSync endpoint. Archive is not
+    deletion. All mutation routes require Idempotency-Key. Production `/v1`
+    requests accept only the configured custom API host; the application rejects
+    an unexpected product host with a `421` problem before domain or AWS access.
 servers:
   - url: https://api.loans.example.com
     description: Placeholder production URL; runtime configuration supplies the real domain.
@@ -46,6 +50,8 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateLoanRequest'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
           description: A new active loan instance was created.
           content:
@@ -64,12 +70,14 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Current loan instance and archive history.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LoanView' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/archive:
@@ -83,6 +91,8 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
           description: The loan was archived; an idempotent replay returns this exact response.
           content:
@@ -102,12 +112,14 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Read-only loan archive manifest view.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LoanArchiveView' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/archives/{loanArchiveSequence}/documents/{documentId}:
@@ -122,6 +134,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Document snapshot captured by an immutable loan archive.
           content:
@@ -143,6 +157,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Prior document-version archive belonging to an archived loan instance.
           content:
@@ -164,6 +180,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Data points pinned by a prior document-version archive in an archived loan.
           content:
@@ -185,6 +203,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for data points pinned by a prior document-version archive.
           content:
@@ -210,6 +230,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact PDF pinned by a prior document-version archive.
           content:
@@ -230,6 +252,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Extracted data-point JSON pinned by the loan archive.
           content:
@@ -250,6 +274,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for data points pinned by the loan archive.
           content:
@@ -274,6 +300,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact PDF version pinned by the loan archive.
           content:
@@ -298,13 +326,17 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/CreateUploadRequest' }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '201':
-          description: Stable logical document and first physical upload were initialized.
+          description: >-
+            Stable logical document and first physical upload were initialized.
+            An exact idempotent retry mints a fresh short-lived upload grant only
+            while that upload is still awaiting bytes; signed fields are never persisted.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UploadSession' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '413': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
@@ -325,8 +357,12 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/CreateUploadRequest' }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
-          description: Replacement upload initialized under the stable document ID.
+          description: >-
+            Replacement upload initialized under the stable document ID. An exact
+            idempotent retry renews the short-lived grant only before upload completion.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UploadSession' }
@@ -354,6 +390,8 @@ paths:
               type: object
               additionalProperties: false
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '202':
           description: Exact S3 version was captured and validation/malware reconciliation is pending.
           content:
@@ -375,12 +413,14 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Current logical document and physical upload/processing state.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DocumentView' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/documents/{documentId}/archive:
@@ -395,6 +435,8 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '201':
           description: The current version was archived; an idempotent replay returns this exact response.
           content:
@@ -415,6 +457,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Read-only document archive metadata.
           content:
@@ -435,6 +479,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Data points pinned by a prior document-version archive.
           content:
@@ -455,6 +501,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for data points pinned by a prior document-version archive.
           content:
@@ -479,6 +527,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact PDF pinned by a prior document-version archive.
           content:
@@ -498,6 +548,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: Extracted data-point JSON. Shape depends on the pinned IDP schema version.
           content:
@@ -505,6 +556,7 @@ paths:
               schema: { type: object, additionalProperties: true }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         default: { $ref: '#/components/responses/Problem' }
 
   /v1/loans/{loanId}/documents/{documentId}/data-points/download:
@@ -518,6 +570,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for the pinned data-point object version.
           content:
@@ -541,6 +595,8 @@ paths:
           required: true
           schema: { type: string, enum: [source, selected] }
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '200':
           description: Short-lived grant for an exact S3 object version.
           content:
@@ -557,7 +613,13 @@ components:
       description: |
         Delegated tokens must carry both the operation's `scp` and assigned app role.
         App-only tokens use the `.default` client-credentials request and must carry
-        the assigned application role plus `idtyp=app`.
+        the assigned application role, `idtyp=app`, and `azpacr=2`, proving that the
+        allowlisted client authenticated to Entra with a certificate. Client-secret
+        app tokens are rejected. A missing, malformed, expired, or cryptographically
+        invalid bearer token returns `401`. A cryptographically valid token that
+        fails the exact tenant/client allowlist, token-type, certificate, scope, or
+        role policy returns `403`. Error bodies use the `Problem` schema when the
+        request reaches the application authorization boundary.
       flows:
         authorizationCode:
           authorizationUrl: https://login.microsoftonline.com/{tenant-id}/oauth2/v2.0/authorize
@@ -615,6 +677,19 @@ components:
       required: true
       schema: { type: integer, minimum: 1 }
   responses:
+    BadRequest:
+      description: >-
+        Request metadata or content is invalid, including a malformed or
+        inconsistent Content-Length value, a non-UTF-8 body, or an
+        operation-specific request validation failure.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Request body exceeds the Azure API configured bounded-body limit.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     Problem:
       description: RFC 9457 problem detail.
       content:
@@ -728,6 +803,10 @@ components:
           description: Base64-encoded 32-byte SHA-256 digest required by S3 checksum headers.
           pattern: '^[A-Za-z0-9+/]{43}=$'
     UploadSession:
+      description: >-
+        Short-lived S3 POST grant returned only after Azure authorization. Stable
+        IDs may be retained for idempotency; policy, signature, and security-token
+        fields must not be stored in the registry.
       type: object
       required: [loanId, documentId, uploadId, status, expiresAt, upload]
       properties:

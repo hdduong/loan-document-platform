@@ -1,5 +1,7 @@
 # Implementation Plan: Loan Document Platform
 
+> **Historical baseline — do not execute.** This file records the superseded AWS-hosted product API. Use the current [Azure API control-plane specification](../002-azure-api-control-plane/spec.md) and its companion files for implementation.
+
 - **Feature**: `001-loan-document-platform`
 - **Date**: 2026-07-14
 - **Specification**: [spec.md](spec.md)

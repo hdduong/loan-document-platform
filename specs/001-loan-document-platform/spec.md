@@ -1,5 +1,12 @@
 # Feature Specification: Loan Document Platform
 
+> **Historical baseline**: This packet records the original AWS-hosted public
+> API design. It is superseded for new implementation work by
+> [`002-azure-api-control-plane`](../002-azure-api-control-plane/spec.md), which
+> moves the sole public/domain API to Azure while retaining the private AWS data
+> and headless IDP processing plane. Checked tasks here remain historical facts;
+> they are not authorization to redeploy the retired AWS Loan API.
+
 - **Feature Directory**: `001-loan-document-platform`
 - **Created**: 2026-07-14
 - **Status**: In progress — brownfield implementation baseline
@@ -140,6 +147,8 @@ Interactive users sign in to the React SPA with Entra SSO and PKCE. API callers 
 - **FR-028**: Logs, metrics, traces, alarms, and source control MUST exclude PDF/OCR content, extracted values, tokens, signed URLs, private keys, credentials, and sensitive filenames.
 - **FR-029**: Queues/events MUST use bounded retry, deduplication/idempotency, DLQs, and reconciliation so a missed asynchronous event does not silently strand an upload.
 - **FR-030**: Permanent purge MUST remain a separate legal-hold-aware administrator workflow; archive endpoints MUST NOT delete preserved business records or object versions.
+- **FR-031**: CI MUST measure every hand-authored production Python service file independently and in aggregate and MUST fail when line coverage is below 80%; future authored React/TypeScript production files MUST independently meet 80% statements, lines, functions, and branches. Aggregation, threshold reduction, narrowed source inclusion, or unjustified exclusions MUST NOT conceal a deficient file.
+- **FR-032**: Every affected SPA journey MUST have a Playwright integration test against the production build with deterministic synthetic identity, API, and storage behavior; critical hosted Entra/API/S3 journeys MUST pass an environment-gated synthetic Playwright smoke suite before production acceptance.
 
 ### Key Entities
 
@@ -182,7 +191,9 @@ Interactive users sign in to the React SPA with Entra SSO and PKCE. API callers 
 - **SC-004**: Negative acceptance tests demonstrate that every non-clean scan result, mismatched version/checksum, invalid PDF, tied/ambiguous selection, and invalid authorization case fails closed before unauthorized processing or disclosure.
 - **SC-005**: Every mutation can be retried with the same idempotency key without an extra business effect, while changed content with the same key is rejected.
 - **SC-006**: All active/archive document and data-point downloads require a fresh permission decision and expire within five minutes.
-- **SC-007**: Repository validation, unit tests, lint, OpenAPI validation, CloudFormation lint, PowerShell parsing, and the React lint/test/build suite all pass before production deployment.
+- **SC-007**: Repository validation, per-file and aggregate 80% production-code coverage, lint, OpenAPI validation, CloudFormation lint, PowerShell parsing, React typecheck/build, and applicable Playwright integration suites all pass before production deployment.
 - **SC-008**: Production smoke tests confirm Entra SSO/API OAuth, custom UI/API hostnames, WAF/origin isolation, alarm delivery, and no sensitive payloads in sampled logs.
 - **SC-009**: A documented restore exercise and machine-client certificate rotation exercise complete successfully before production acceptance.
 - **SC-010**: Processing provenance lets an operator trace each result to exact source/selected versions, checksums, config/model versions, and execution identifiers without reading document content from logs.
+- **SC-011**: A test change that lowers any in-scope production file to 79.99% line coverage or weakens a configured threshold fails CI.
+- **SC-012**: Synthetic Playwright cases cover sign-in/permissions, loan lifecycle, direct upload/completion/status, document archive/replacement, reads/downloads, retry/hold/expiry behavior, accessibility, and prohibited browser persistence without contacting live services on pull requests.

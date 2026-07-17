@@ -8,22 +8,27 @@ on:
         required: true
         type: string
       skip_idp:
-        description: Skip pinned headless IDP deployment/config synchronization
-        required: true
-        default: false
-        type: boolean
-      skip_edge:
-        description: Skip CloudFront, WAF, certificates, and DNS
+        description: Reuse the currently pinned headless IDP deployment
         required: true
         default: false
         type: boolean
       skip_web:
-        description: Skip React deployment (leave enabled until Claude UI is ready)
+        description: Skip React publication until the UI scaffold is ready
         required: true
         default: true
         type: boolean
-      skip_ui_tests:
-        description: Skip UI tests before web deployment
+      bind_api_custom_domain:
+        description: Stage the Azure-managed API certificate (does not change traffic DNS)
+        required: true
+        default: false
+        type: boolean
+      cutover_api_domain:
+        description: Cut API DNS over after deep federation readiness and retain rollback records
+        required: true
+        default: false
+        type: boolean
+      bind_ui_custom_domain:
+        description: Publish and cut the UI CNAME over to Azure Static Web Apps
         required: true
         default: false
         type: boolean
@@ -50,16 +55,17 @@ jobs:
   deploy:
     name: deploy-production
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     environment: prod
     env:
+      DEPLOY_CONFIRMATION: ${{ inputs.confirmation }}
       SKIP_IDP: ${{ inputs.skip_idp }}
-      SKIP_EDGE: ${{ inputs.skip_edge }}
       SKIP_WEB: ${{ inputs.skip_web }}
-      SKIP_UI_TESTS: ${{ inputs.skip_ui_tests }}
+      BIND_API_CUSTOM_DOMAIN: ${{ inputs.bind_api_custom_domain }}
+      CUTOVER_API_DOMAIN: ${{ inputs.cutover_api_domain }}
+      BIND_UI_CUSTOM_DOMAIN: ${{ inputs.bind_ui_custom_domain }}
       REINSTALL_IDP_CLI: ${{ inputs.reinstall_idp_cli }}
       CLEAN_IDP_BUILD: ${{ inputs.clean_idp_build }}
-      DEPLOY_CONFIRMATION: ${{ inputs.confirmation }}
     steps:
       - name: Verify deployment intent
         shell: pwsh
@@ -69,6 +75,12 @@ jobs:
           }
           if ($env:GITHUB_REF -cne 'refs/heads/main') {
             throw "Production may be deployed only from main; received $env:GITHUB_REF."
+          }
+          if ($env:CUTOVER_API_DOMAIN -ceq 'true' -and $env:BIND_API_CUSTOM_DOMAIN -cne 'true') {
+            throw 'API DNS cutover requires certificate/domain staging in the same reviewed run.'
+          }
+          if ($env:BIND_UI_CUSTOM_DOMAIN -ceq 'true' -and $env:SKIP_WEB -ceq 'true') {
+            throw 'UI custom-domain cutover cannot be requested while web publication is skipped.'
           }
 
       - name: Check out reviewed source
@@ -90,19 +102,27 @@ jobs:
         with:
           version: '1.163.0'
 
+      - name: Install checksum-pinned Trivy scanner
+        shell: pwsh
+        run: ./scripts/install-trivy.ps1
+
       - name: Install validation dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
 
-      - name: Revalidate release input
+      - name: Revalidate exact release input
         shell: pwsh
         run: |
           python scripts/validate-repository.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-powershell-syntax.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m compileall -q services scripts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruff check services scripts tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pytest -q
+          pytest -q --cov=services --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/check-python-coverage.py coverage.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           openapi-spec-validator contracts/openapi/loan-api.yaml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -110,40 +130,15 @@ jobs:
             cfn-lint $_.FullName
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+          az bicep build --file infra/azure/main.bicep --stdout | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Materialize protected deployment configuration
-        id: config
-        shell: pwsh
-        env:
-          DEPLOYMENT_CONFIG_JSON: ${{ vars.DEPLOYMENT_CONFIG_JSON }}
-          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-          ENTRA_API_CLIENT_ID: ${{ vars.ENTRA_API_CLIENT_ID }}
-          ENTRA_SPA_CLIENT_ID: ${{ vars.ENTRA_SPA_CLIENT_ID }}
-          LOAN_API_ORIGIN_VERIFY_SECRET: ${{ secrets.LOAN_API_ORIGIN_VERIFY_SECRET }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:DEPLOYMENT_CONFIG_JSON)) {
-            throw 'Missing protected environment variable DEPLOYMENT_CONFIG_JSON.'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:AWS_ACCOUNT_ID)) {
-            throw 'Missing protected environment variable AWS_ACCOUNT_ID.'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:ENTRA_API_CLIENT_ID) -or
-              [string]::IsNullOrWhiteSpace($env:ENTRA_SPA_CLIENT_ID)) {
-            throw 'Missing Entra API or SPA application ID. Run scripts/sync-github-entra.ps1.'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:LOAN_API_ORIGIN_VERIFY_SECRET) -or
-              $env:LOAN_API_ORIGIN_VERIFY_SECRET.Length -lt 32) {
-            throw 'Missing or invalid protected origin-verification secret.'
-          }
-
-          $config = $env:DEPLOYMENT_CONFIG_JSON | ConvertFrom-Json -Depth 20
-          if ($config.environment -cne 'prod') { throw 'The production workflow received a non-production configuration.' }
-          if ($config.awsAccountId -cne $env:AWS_ACCOUNT_ID) { throw 'AWS account variables disagree.' }
-          $directory = Join-Path $env:GITHUB_WORKSPACE '.local'
-          [System.IO.Directory]::CreateDirectory($directory) | Out-Null
-          $path = Join-Path $directory 'ci-prod.json'
-          [System.IO.File]::WriteAllText($path, $env:DEPLOYMENT_CONFIG_JSON, [System.Text.UTF8Encoding]::new($false))
-          "DEPLOYMENT_CONFIG_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Sign in to Azure with exact GitHub environment OIDC
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Configure short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
@@ -156,28 +151,112 @@ jobs:
           mask-aws-account-id: true
           unset-current-credentials: true
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity --no-cli-pager
+      - name: Materialize protected non-secret configuration
+        shell: pwsh
+        env:
+          DEPLOYMENT_CONFIG_JSON: ${{ vars.DEPLOYMENT_CONFIG_JSON }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DEPLOYMENT_CONFIG_JSON)) {
+            throw 'Missing protected environment variable DEPLOYMENT_CONFIG_JSON.'
+          }
+          $config = $env:DEPLOYMENT_CONFIG_JSON | ConvertFrom-Json -Depth 30
+          if ($config.environment -cne 'prod') { throw 'Production workflow received a non-production configuration.' }
+          if ([string]$config.awsAccountId -cne $env:AWS_ACCOUNT_ID) { throw 'AWS account variables disagree.' }
+          if ([string]$config.azureSubscriptionId -cne '${{ vars.AZURE_SUBSCRIPTION_ID }}' -or
+              [string]$config.entraTenantId -cne '${{ vars.AZURE_TENANT_ID }}') {
+            throw 'Azure protected variables disagree with the deployment configuration.'
+          }
+          $directory = Join-Path $env:GITHUB_WORKSPACE '.local'
+          [IO.Directory]::CreateDirectory($directory) | Out-Null
+          $path = Join-Path $directory 'ci-prod.json'
+          [IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+          "DEPLOYMENT_CONFIG_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Deploy reviewed production stacks
+      - name: Verify cloud identities
+        shell: pwsh
+        run: |
+          aws sts get-caller-identity --no-cli-pager | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $account = az account show --output json | ConvertFrom-Json -Depth 20
+          if ([string]$account.id -cne '${{ vars.AZURE_SUBSCRIPTION_ID }}' -or
+              [string]$account.tenantId -cne '${{ vars.AZURE_TENANT_ID }}') {
+            throw 'Azure OIDC identity resolved to the wrong tenant or subscription.'
+          }
+
+      - name: Deploy non-public Azure foundation
+        shell: pwsh
+        run: |
+          ./scripts/deploy-azure.ps1 -EnvironmentFile $env:DEPLOYMENT_CONFIG_PATH -FoundationOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Materialize reviewed Entra and federation identifiers
         shell: pwsh
         env:
           ENTRA_API_CLIENT_ID: ${{ vars.ENTRA_API_CLIENT_ID }}
           ENTRA_SPA_CLIENT_ID: ${{ vars.ENTRA_SPA_CLIENT_ID }}
           ENTRA_SERVICE_CLIENT_ID: ${{ vars.ENTRA_SERVICE_CLIENT_ID }}
-          LOAN_API_ORIGIN_VERIFY_SECRET: ${{ secrets.LOAN_API_ORIGIN_VERIFY_SECRET }}
+          ENTRA_AWS_FEDERATION_CLIENT_ID: ${{ vars.ENTRA_AWS_FEDERATION_CLIENT_ID }}
+          ENTRA_AWS_FEDERATION_AUDIENCE: ${{ vars.ENTRA_AWS_FEDERATION_AUDIENCE }}
         run: |
-          $originSecret = ConvertTo-SecureString $env:LOAN_API_ORIGIN_VERIFY_SECRET -AsPlainText -Force
+          $config = Get-Content -Raw -LiteralPath $env:DEPLOYMENT_CONFIG_PATH | ConvertFrom-Json -Depth 30
+          foreach ($name in @('ENTRA_API_CLIENT_ID', 'ENTRA_SPA_CLIENT_ID', 'ENTRA_AWS_FEDERATION_CLIENT_ID', 'ENTRA_AWS_FEDERATION_AUDIENCE')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing protected non-secret variable $name. Run the Entra synchronization scripts."
+            }
+          }
+          if ($env:ENTRA_AWS_FEDERATION_AUDIENCE -cne "api://$($env:ENTRA_AWS_FEDERATION_CLIENT_ID)") {
+            throw 'Federation audience is not the canonical dedicated application audience.'
+          }
+          $identity = az identity show `
+            --subscription $config.azureSubscriptionId `
+            --resource-group $config.azureResourceGroupName `
+            --name $config.azureApiManagedIdentityName `
+            --output json | ConvertFrom-Json -Depth 20
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$identity.principalId)) {
+            throw 'Azure API managed identity was not created by the foundation deployment.'
+          }
+          $service = if ([string]::IsNullOrWhiteSpace($env:ENTRA_SERVICE_CLIENT_ID)) {
+            $null
+          } else {
+            @{ clientId = $env:ENTRA_SERVICE_CLIENT_ID }
+          }
+          $entra = [ordered]@{
+            tenantId = [string]$config.entraTenantId
+            issuer = "https://login.microsoftonline.com/$($config.entraTenantId)/v2.0"
+            api = @{ clientId = $env:ENTRA_API_CLIENT_ID; audience = $env:ENTRA_API_CLIENT_ID; scopeBase = "api://$($env:ENTRA_API_CLIENT_ID)" }
+            spa = @{ clientId = $env:ENTRA_SPA_CLIENT_ID }
+            service = $service
+          }
+          $federation = [ordered]@{
+            tenantId = [string]$config.entraTenantId
+            issuer = "https://sts.windows.net/$($config.entraTenantId)/"
+            audience = $env:ENTRA_AWS_FEDERATION_AUDIENCE
+            applicationClientId = $env:ENTRA_AWS_FEDERATION_CLIENT_ID
+            managedIdentity = @{
+              resourceId = [string]$identity.id
+              clientId = [string]$identity.clientId
+              principalId = [string]$identity.principalId
+            }
+          }
+          [IO.File]::WriteAllText((Join-Path $env:GITHUB_WORKSPACE '.local/entra-prod.json'), ($entra | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllText((Join-Path $env:GITHUB_WORKSPACE '.local/entra-aws-federation-prod.json'), ($federation | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+
+      - name: Deploy Azure control plane and private AWS processing plane
+        shell: pwsh
+        run: |
           $parameters = @{
             EnvironmentFile = $env:DEPLOYMENT_CONFIG_PATH
-            OriginVerifySecret = $originSecret
+            SkipAzureFoundation = $true
             SkipEntra = $true
             SkipIdp = ($env:SKIP_IDP -ceq 'true')
-            SkipEdge = ($env:SKIP_EDGE -ceq 'true')
             SkipWeb = ($env:SKIP_WEB -ceq 'true')
-            SkipUiTests = ($env:SKIP_UI_TESTS -ceq 'true')
+            BindApiCustomDomain = ($env:BIND_API_CUSTOM_DOMAIN -ceq 'true')
+            CutoverApiDomain = ($env:CUTOVER_API_DOMAIN -ceq 'true')
+            BindUiCustomDomain = ($env:BIND_UI_CUSTOM_DOMAIN -ceq 'true')
             ReinstallIdpCli = ($env:REINSTALL_IDP_CLI -ceq 'true')
             CleanIdpBuild = ($env:CLEAN_IDP_BUILD -ceq 'true')
+            ImageTag = $env:GITHUB_SHA
           }
-          & ./scripts/deploy-all.ps1 @parameters
+          ./scripts/deploy-all.ps1 @parameters
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

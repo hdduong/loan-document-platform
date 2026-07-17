@@ -1,5 +1,7 @@
 # Security Requirements Checklist: Loan Document Platform
 
+> **Historical baseline — do not execute.** This file records the superseded AWS-hosted product API. Use the current [Azure API control-plane specification](../../002-azure-api-control-plane/spec.md) and its companion files for implementation.
+
 - **Purpose**: Confirm that the feature specification states the controls required by the project constitution and [security policy](../../../docs/security.md).
 - **Created**: 2026-07-14
 - **Feature**: [spec.md](../spec.md)
