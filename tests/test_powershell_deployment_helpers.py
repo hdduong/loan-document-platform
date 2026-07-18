@@ -317,6 +317,7 @@ def test_entra_permission_namespace_preflight_rejects_reserved_or_duplicate_valu
     first_graph_mutation = "$apiApp = Ensure-Application"
 
     assert result == {"Valid": True, "ReservedRejected": True, "DuplicateRejected": True}
+    assert "[StringComparer]::OrdinalIgnoreCase" in source
     assert preflight_call in source
     assert source.index(preflight_call) < source.index(first_graph_mutation)
 

@@ -114,11 +114,15 @@ function Get-ApplicationRoleValue {
 function Assert-PermissionValueNamespaces {
     param([Parameter(Mandatory)][string[]]$PermissionValues)
 
-    $uniqueValues = @($PermissionValues | Sort-Object -Unique)
+    $uniqueValues = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $hasDuplicate = $false
+    foreach ($permissionValue in $PermissionValues) {
+        if (-not $uniqueValues.Add($permissionValue)) { $hasDuplicate = $true }
+    }
     $reservedValues = @($PermissionValues | Where-Object {
         $_.EndsWith('.Role', [StringComparison]::OrdinalIgnoreCase)
     })
-    if ($uniqueValues.Count -ne $PermissionValues.Count -or $reservedValues.Count -gt 0) {
+    if ($hasDuplicate -or $reservedValues.Count -gt 0) {
         throw 'Permission catalog values must be unique and must not use the reserved .Role suffix.'
     }
 }
