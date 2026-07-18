@@ -102,6 +102,19 @@ def _claim_values(value: Any) -> frozenset[str]:
     return frozenset()
 
 
+_APPLICATION_ROLE_SUFFIX = ".Role"
+
+
+def _permission_roles(value: Any) -> frozenset[str]:
+    """Normalize collision-free Entra app-role values to domain permissions."""
+
+    return frozenset(
+        role[: -len(_APPLICATION_ROLE_SUFFIX)]
+        for role in _claim_values(value)
+        if role.endswith(_APPLICATION_ROLE_SUFFIX) and role != _APPLICATION_ROLE_SUFFIX
+    )
+
+
 class JwtValidator:
     """Validate Entra JWTs and enforce the platform's route authorization rules."""
 
@@ -160,14 +173,15 @@ class JwtValidator:
             raise AuthProblem(403, "ACTOR_REQUIRED", "The token has no immutable actor identifier")
 
         scopes = _claim_values(claims.get("scp"))
-        roles = _claim_values(claims.get("roles"))
+        roles = _permission_roles(claims.get("roles"))
+        required_role_value = f"{required_permission_name}{_APPLICATION_ROLE_SUFFIX}"
         if scopes:
             if claims.get("idtyp") == "app":
                 raise AuthProblem(403, "TOKEN_TYPE_NOT_ALLOWED", "An app-only token cannot use delegated scopes")
             if required_permission_name not in scopes:
                 raise AuthProblem(403, "SCOPE_REQUIRED", f"Required delegated scope: {required_permission_name}")
             if self._settings.require_user_roles and required_permission_name not in roles:
-                raise AuthProblem(403, "ROLE_REQUIRED", f"Required assigned app role: {required_permission_name}")
+                raise AuthProblem(403, "ROLE_REQUIRED", f"Required assigned app role: {required_role_value}")
             actor_type = "user"
         else:
             if claims.get("idtyp") != "app":
@@ -179,7 +193,7 @@ class JwtValidator:
                     "Application callers must authenticate with a certificate",
                 )
             if required_permission_name not in roles:
-                raise AuthProblem(403, "ROLE_REQUIRED", f"Required application role: {required_permission_name}")
+                raise AuthProblem(403, "ROLE_REQUIRED", f"Required application role: {required_role_value}")
             actor_type = "servicePrincipal"
 
         return Principal(

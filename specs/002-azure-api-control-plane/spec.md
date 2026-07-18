@@ -77,6 +77,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 4. **Given** a pull request or production deployment, **When** automation runs, **Then** validation uses no production document data and cloud deployment uses repository- and environment-restricted workload federation.
 5. **Given** Azure CLI is installed through the Windows MSI `az.cmd` wrapper, **When** a provisioning script sends a Graph query URI or JSON body containing command-shell metacharacters, **Then** the script bypasses `cmd.exe`, preserves every argument exactly, and fails closed if the safe Azure CLI engine cannot be resolved.
 6. **Given** a new Entra application has no existing delegated scopes or application roles, **When** provisioning initializes its permissions, **Then** the empty collections are accepted and every required permission receives a stable generated identifier.
+7. **Given** custom Entra applications require unique delegated-scope and app-role values, **When** canonical permission `P` is provisioned, **Then** its scope is `P`, its role is `P.Role`, and the Azure API accepts only that exact role before normalizing it to `P` for private domain dispatch.
 
 ### Edge Cases
 
@@ -120,6 +121,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **FR-024**: Production `/v1` routes MUST accept only the configured custom API host; the Container Apps provider hostname MAY expose only `/health` and `/ready` for deployment probes, and production SPA publication MUST require recorded custom-domain binding and DNS cutover.
 - **FR-025**: While the retained domain uses module-global AWS clients, each single-worker Azure API replica MUST serialize workload-session acquisition, client binding, and domain dispatch; its HTTP scale target MUST remain exactly `1` to minimize head-of-line waiting without treating that scaling signal as a hard admission cap, and horizontal scale MUST remain bounded by the configured maximum replicas.
 - **FR-026**: PowerShell provisioning MUST invoke Azure CLI without passing Graph query URIs, JSON bodies, or other untrusted metacharacters through the Windows command processor; Windows MSI installations MUST use the bundled Azure CLI Python engine directly, while non-`cmd` installations MUST preserve native argument boundaries.
+- **FR-027**: For canonical permission `P`, Entra provisioning MUST publish delegated scope `P` and collision-free application role `P.Role`; the Azure API MUST reject an unsuffixed or differently suffixed role and normalize only `P.Role` to `P` after validating the external token.
 
 ### Key Entities
 
@@ -146,6 +148,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **SC-009**: A clean-environment scripted deployment produces the Azure custom HTTPS API, exact managed-identity federation trust, retained AWS data plane, and pinned headless IDP without storing a reusable AWS key or application secret.
 - **SC-010**: Production acceptance demonstrates successful backup restore, credential/trust revocation, certificate renewal, dependency-failure alarms, and a synthetic end-to-end upload/status/download journey.
 - **SC-011**: Automated PowerShell-helper tests prove that Azure CLI arguments containing `&`, `$`, and JSON punctuation remain single literal arguments and that Windows `az.cmd` resolution selects the bundled Python engine rather than executing the wrapper.
+- **SC-012**: Deterministic provisioning and JWT tests prove that no generated scope and app role share a value, raw `P.Role` authorizes canonical permission `P`, and raw unsuffixed role `P` is rejected.
 
 ## Assumptions
 

@@ -70,9 +70,10 @@ does not accept localhost redirect URIs.
 2. The Azure API cryptographically validates the tenant-specific v2 issuer,
    signature, algorithm, exact API audience, time claims, tenant, token type,
    immutable actor, allowed client, emergency denylist, and route permission.
-3. A delegated request requires both its declared `scp` value and matching
-   assigned application role. An app-only request requires an exact allowlisted
-   client, the matching role, `idtyp=app`, and `azpacr=2` certificate proof.
+3. For canonical permission `P`, a delegated request requires `scp` value `P`
+   and assigned application role `P.Role`. An app-only request requires an exact
+   allowlisted client, role `P.Role`, `idtyp=app`, and `azpacr=2` certificate
+   proof. The Azure API normalizes the suffixed role to `P` only after validation.
 4. The Container App's dedicated user-assigned managed identity obtains a
    separate v1 Entra token for the dedicated AWS-federation audience.
 5. AWS STS accepts that workload token only through an OIDC trust matching the

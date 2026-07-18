@@ -144,10 +144,10 @@ $requiredPermissions = @('Loan.Create', 'Loan.Archive', 'Document.Upload', 'Docu
 $roles = @($claims.roles)
 $tokenType = if ($claims.PSObject.Properties['idtyp']) { [string]$claims.idtyp } else { 'user' }
 if ($tokenType -eq 'app') {
-    $missing = @($requiredPermissions | Where-Object { $roles -notcontains $_ })
+    $missing = @($requiredPermissions | Where-Object { $roles -notcontains "$($_).Role" })
 } else {
     $scopes = @(([string]$claims.scp).Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
-    $missing = @($requiredPermissions | Where-Object { $roles -notcontains $_ -or $scopes -notcontains $_ })
+    $missing = @($requiredPermissions | Where-Object { $roles -notcontains "$($_).Role" -or $scopes -notcontains $_ })
 }
 if ($missing.Count -gt 0) { throw 'Bearer token lacks one or more required synthetic-test permissions.' }
 $claims = $null

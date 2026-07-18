@@ -113,7 +113,8 @@
               <b>Azure verifies the app-only caller</b>
               Signature, exact v2 tenant issuer, bare product API GUID audience, lifetime,
               tenant, immutable actor, allowed client, <span class="mono">idtyp=app</span>,
-              <span class="mono">azpacr=2</span>, and the route's application role.
+              <span class="mono">azpacr=2</span>, and route application role
+              <span class="mono">P.Role</span>.
               <span class="deny"> Invalid authentication is 401; a valid token that fails policy is 403.
               If ingress rejects first, its body need not be the application's canonical problem shape.</span>
             </div>

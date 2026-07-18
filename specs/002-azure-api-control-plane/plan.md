@@ -90,6 +90,8 @@ PowerShell automation routes Azure CLI calls that carry Graph query strings or J
 
 Clean-tenant Entra provisioning treats absent delegated-scope and application-role collections as valid empty inputs, generates identifiers for the complete reviewed permission set, and retains existing identifiers on idempotent reruns. The helper-level regression invokes the extracted PowerShell function with an empty collection so parser-only tests cannot conceal a parameter-binding failure.
 
+Custom Entra applications enforce one value namespace across delegated scopes and application roles. The external claim contract therefore keeps canonical scope `P` while publishing role `P.Role`. A provisioning preflight rejects duplicate canonical values and reserves the `.Role` suffix so future catalog additions cannot reintroduce a cross-collection collision. The Azure JWT boundary accepts only the exact suffix, normalizes authorized roles back to canonical `P`, and passes only canonical permissions into the retained private domain seam. This preserves the public OAuth scope names and the existing domain contract without weakening role enforcement.
+
 ## Project Structure
 
 ### Documentation (this feature)

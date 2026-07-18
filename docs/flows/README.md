@@ -21,8 +21,8 @@ page is the accessible GitHub-rendered companion.
 
 | Boundary | Credential | Required claims or trust | Where it stops |
 |---|---|---|---|
-| Human SPA to Azure API | Entra v2 delegated product access token obtained with authorization code + PKCE | Exact tenant issuer, bare product API GUID audience, lifetime, tenant, user `oid`, allowlisted SPA `azp`, route `scp`, and matching assigned `roles` | Azure API |
-| Service caller to Azure API | Entra v2 app-only product access token obtained with a certificate-signed `private_key_jwt` assertion | Exact tenant issuer, bare product API GUID audience, lifetime, tenant, service-principal `oid`, allowlisted client, route `roles`, `idtyp=app`, `azpacr=2`, and no `scp` | Azure API |
+| Human SPA to Azure API | Entra v2 delegated product access token obtained with authorization code + PKCE | Exact tenant issuer, bare product API GUID audience, lifetime, tenant, user `oid`, allowlisted SPA `azp`, route scope `P`, and matching assigned role `P.Role` | Azure API |
+| Service caller to Azure API | Entra v2 app-only product access token obtained with a certificate-signed `private_key_jwt` assertion | Exact tenant issuer, bare product API GUID audience, lifetime, tenant, service-principal `oid`, allowlisted client, route role `P.Role`, `idtyp=app`, `azpacr=2`, and no `scp` | Azure API |
 | Azure API to AWS STS | Dedicated Entra v1 managed-identity workload token | Issuer `https://sts.windows.net/<tenant-guid>/`, audience `api://<federation-application-guid>`, and subject equal to the user-assigned managed identity principal/object ID | Regional AWS STS |
 
 The common cryptographic checks do not make delegated and app-only

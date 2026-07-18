@@ -610,10 +610,14 @@ components:
   securitySchemes:
     entraOAuth:
       type: oauth2
+      x-application-role-suffix: .Role
       description: |
-        Delegated tokens must carry both the operation's `scp` and assigned app role.
+        For an operation whose `x-required-permission` is `P`, delegated tokens must
+        carry scope `P` and assigned app role `P.Role`. Custom Entra applications
+        require distinct scope and app-role values; the Azure API normalizes only
+        that exact `.Role` suffix to the canonical permission before dispatch.
         App-only tokens use the `.default` client-credentials request and must carry
-        the assigned application role, `idtyp=app`, and `azpacr=2`, proving that the
+        application role `P.Role`, `idtyp=app`, and `azpacr=2`, proving that the
         allowlisted client authenticated to Entra with a certificate. Client-secret
         app tokens are rejected. A missing, malformed, expired, or cryptographically
         invalid bearer token returns `401`. A cryptographically valid token that

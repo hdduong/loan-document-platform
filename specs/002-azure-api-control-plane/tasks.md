@@ -170,6 +170,15 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 9: Entra Permission-Value Collision Remediation
+
+**Purpose**: Use collision-free external Entra claim values while preserving canonical permissions at the private domain boundary.
+
+- [x] T055 [P] [US4] Add provisioning and JWT regressions for scope `P`, app role `P.Role`, canonical role normalization, and rejection of raw unsuffixed roles in `tests/test_powershell_deployment_helpers.py` and `tests/test_azure_api_auth.py`
+- [x] T056 [US4] Namespace Entra app-role values, normalize them at the Azure JWT boundary, update the synthetic load validator, and document the exact scope/role mapping in the OpenAPI and UI/security handoffs
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

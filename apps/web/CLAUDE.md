@@ -11,7 +11,7 @@ Quality gates are mandatory: `npm run typecheck`, `npm run test:coverage`, the p
 Non-negotiable security rules:
 
 - Use Entra authorization code + PKCE and `sessionStorage` for MSAL cache.
-- Enable an action only when the delegated token contains both its scope and matching assigned app role.
+- For canonical permission `P`, enable an action only when the delegated token contains scope `P` and matching assigned app role `P.Role`.
 - Never add a browser client secret, certificate, AWS credential, or service-client flow.
 - Never log or persist tokens, presigned URLs, filenames, PDF content, loan data, or extracted data points.
 - Do not add a service worker in v1.

@@ -262,6 +262,66 @@ def test_permission_id_helper_accepts_empty_collection_and_reuses_existing_id() 
     assert result["Reused"] == existing_id
 
 
+def test_entra_app_role_values_are_namespaced_from_delegated_scopes() -> None:
+    entra_script = ROOT / "scripts" / "provision-entra.ps1"
+    module_path = str(entra_script).replace("'", "''")
+    script = (
+        "$tokens = $null; $errors = $null; "
+        f"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{module_path}', "
+        "[ref]$tokens, [ref]$errors); "
+        "$definition = $ast.Find({ param($node) "
+        "$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+        "$node.Name -eq 'Get-ApplicationRoleValue' }, $true); "
+        "Invoke-Expression $definition.Extent.Text; "
+        "$role = Get-ApplicationRoleValue -PermissionValue 'Loan.Read'; "
+        "[Console]::Out.Write($role)"
+    )
+
+    role_value = run_powershell(script, environment=os.environ.copy())
+    source = entra_script.read_text(encoding="utf-8")
+
+    assert role_value == "Loan.Read.Role"
+    assert role_value != "Loan.Read"
+    assert "$roleValue = Get-ApplicationRoleValue -PermissionValue $permission.Value" in source
+    assert "value = $roleValue" in source
+
+
+def test_entra_permission_namespace_preflight_rejects_reserved_or_duplicate_values() -> None:
+    entra_script = ROOT / "scripts" / "provision-entra.ps1"
+    module_path = str(entra_script).replace("'", "''")
+    script = (
+        "$tokens = $null; $errors = $null; "
+        f"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{module_path}', "
+        "[ref]$tokens, [ref]$errors); "
+        "$definition = $ast.Find({ param($node) "
+        "$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+        "$node.Name -eq 'Assert-PermissionValueNamespaces' }, $true); "
+        "Invoke-Expression $definition.Extent.Text; "
+        "$valid = $true; "
+        "try { Assert-PermissionValueNamespaces -PermissionValues @('Loan.Read', 'Document.Read') } "
+        "catch { $valid = $false }; "
+        "$reservedRejected = $false; "
+        "try { Assert-PermissionValueNamespaces -PermissionValues @('Loan.Read', 'Loan.Read.Role') } "
+        "catch { $reservedRejected = $true }; "
+        "$duplicateRejected = $false; "
+        "try { Assert-PermissionValueNamespaces -PermissionValues @('Loan.Read', 'loan.read') } "
+        "catch { $duplicateRejected = $true }; "
+        "$result = [pscustomobject]@{ Valid = $valid; ReservedRejected = $reservedRejected; "
+        "DuplicateRejected = $duplicateRejected }; "
+        "[Console]::Out.Write(($result | ConvertTo-Json -Compress))"
+    )
+
+    result = json.loads(run_powershell(script, environment=os.environ.copy()))
+    source = entra_script.read_text(encoding="utf-8")
+    preflight_call = "Assert-PermissionValueNamespaces -PermissionValues $permissionValues"
+    first_graph_mutation = "$apiApp = Ensure-Application"
+
+    assert result == {"Valid": True, "ReservedRejected": True, "DuplicateRejected": True}
+    assert "[StringComparer]::OrdinalIgnoreCase" in source
+    assert preflight_call in source
+    assert source.index(preflight_call) < source.index(first_graph_mutation)
+
+
 @pytest.mark.parametrize(
     "stack_id",
     [

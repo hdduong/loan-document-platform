@@ -103,6 +103,30 @@ function Get-OrCreatePermissionId {
     return [guid]::NewGuid().Guid
 }
 
+function Get-ApplicationRoleValue {
+    param([Parameter(Mandatory)][string]$PermissionValue)
+
+    # Custom Entra applications reject a delegated scope and app role that share
+    # the same value. Keep the public scope canonical and namespace the role.
+    return "$PermissionValue.Role"
+}
+
+function Assert-PermissionValueNamespaces {
+    param([Parameter(Mandatory)][string[]]$PermissionValues)
+
+    $uniqueValues = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $hasDuplicate = $false
+    foreach ($permissionValue in $PermissionValues) {
+        if (-not $uniqueValues.Add($permissionValue)) { $hasDuplicate = $true }
+    }
+    $reservedValues = @($PermissionValues | Where-Object {
+        $_.EndsWith('.Role', [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($hasDuplicate -or $reservedValues.Count -gt 0) {
+        throw 'Permission catalog values must be unique and must not use the reserved .Role suffix.'
+    }
+}
+
 $permissions = @(
     @{ Value = 'Loan.Create'; Description = 'Create or recreate an active loan instance.' },
     @{ Value = 'Loan.Read'; Description = 'Read current and archived loan instances.' },
@@ -113,6 +137,8 @@ $permissions = @(
     @{ Value = 'DataPoints.Read'; Description = 'Read and download extracted data points.' },
     @{ Value = 'Admin.Purge'; Description = 'Permanently purge data subject to hold and retention policy.' }
 )
+$permissionValues = @($permissions | ForEach-Object { [string]$_.Value })
+Assert-PermissionValueNamespaces -PermissionValues $permissionValues
 $spaPermissions = $permissions | Where-Object { $_.Value -ne 'Admin.Purge' }
 
 $apiApp = Ensure-Application -DisplayName $config.entraApiAppDisplayName -Kind api
@@ -137,11 +163,12 @@ $scopes = foreach ($permission in $permissions) {
 }
 
 $roles = foreach ($permission in $permissions) {
-    $id = Get-OrCreatePermissionId -Existing $existingRoles -Value $permission.Value
+    $roleValue = Get-ApplicationRoleValue -PermissionValue $permission.Value
+    $id = Get-OrCreatePermissionId -Existing $existingRoles -Value $roleValue
     $roleByValue[$permission.Value] = $id
     [ordered]@{
         id = $id
-        value = $permission.Value
+        value = $roleValue
         displayName = $permission.Value
         description = $permission.Description
         isEnabled = $true

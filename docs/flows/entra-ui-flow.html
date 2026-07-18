@@ -143,8 +143,8 @@
             <div class="checkpoint">
               <b>Azure verifies the delegated caller</b>
               Signature, exact v2 issuer and bare API GUID audience, lifetime, tenant, immutable user
-              actor, allowlisted SPA client, and the route's <span class="mono">scp</span>
-              <strong>and</strong> matching <span class="mono">roles</span> value.
+              actor, allowlisted SPA client, route scope <span class="mono">P</span>,
+              <strong>and</strong> matching assigned role <span class="mono">P.Role</span>.
               <span class="deny"> Invalid authentication is 401; an authenticated user missing either
               permission claim is 403.</span>
             </div>

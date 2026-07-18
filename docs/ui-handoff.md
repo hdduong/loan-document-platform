@@ -34,17 +34,17 @@ These values are public, not secrets. Fail with a clear configuration page rathe
 
 Use single-tenant authorization code + PKCE, `loginRedirect`, `sessionStorage`, and silent token acquisition. On `interaction_required`, authenticate and return to the original route. After a `401`, refresh/retry once, then sign in again.
 
-The browser registration has no client secret/certificate and never requests app-only tokens. Request delegated scopes needed for the current action. Production user tokens also carry matching assigned app roles. Show an action only when the required value is present in both `scp` and `roles`; the server performs the same check. UI capability mapping:
+The browser registration has no client secret/certificate and never requests app-only tokens. Request delegated scopes needed for the current action. Production user tokens also carry matching assigned app roles. For canonical permission `P`, show an action only when `scp` contains `P` and `roles` contains `P.Role`; the server performs the same check and rejects an unsuffixed role. UI capability mapping:
 
-| Scope | Capability |
-|---|---|
-| `Loan.Read` | View current loan and archives |
-| `Loan.Create` | Create/recreate a current loan |
-| `Loan.Archive` | Archive the active loan |
-| `Document.Upload` | Create document/upload/replacement/complete |
-| `Document.Read` | View status and obtain PDF download grants |
-| `Document.Archive` | Archive the current document version |
-| `DataPoints.Read` | View/download extracted data |
+| Scope | Required app role | Capability |
+|---|---|---|
+| `Loan.Read` | `Loan.Read.Role` | View current loan and archives |
+| `Loan.Create` | `Loan.Create.Role` | Create/recreate a current loan |
+| `Loan.Archive` | `Loan.Archive.Role` | Archive the active loan |
+| `Document.Upload` | `Document.Upload.Role` | Create document/upload/replacement/complete |
+| `Document.Read` | `Document.Read.Role` | View status and obtain PDF download grants |
+| `Document.Archive` | `Document.Archive.Role` | Archive the current document version |
+| `DataPoints.Read` | `DataPoints.Read.Role` | View/download extracted data |
 
 `Admin.Purge` is excluded from UI v1. Decoding `scp` may hide actions, but the API remains authoritative.
 

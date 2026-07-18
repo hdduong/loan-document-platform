@@ -30,20 +30,25 @@ redirect URIs, and no wildcard, secret, or certificate. MSAL uses
 `sessionStorage`. Production excludes localhost redirect URIs and applies the
 tenant's Conditional Access/MFA policy.
 
-The product API exposes delegated scopes and matching user/application roles:
+The product API exposes each canonical permission as a delegated scope and a
+distinct matching user/application role. Custom Entra applications require the
+two claim values to be unique:
 
-- `Loan.Create`
-- `Loan.Read`
-- `Loan.Archive`
-- `Document.Upload`
-- `Document.Read`
-- `Document.Archive`
-- `DataPoints.Read`
-- `Admin.Purge` (not granted to UI v1)
+| Permission | Delegated `scp` | Assigned `roles` value |
+|---|---|---|
+| Loan create | `Loan.Create` | `Loan.Create.Role` |
+| Loan read | `Loan.Read` | `Loan.Read.Role` |
+| Loan archive | `Loan.Archive` | `Loan.Archive.Role` |
+| Document upload | `Document.Upload` | `Document.Upload.Role` |
+| Document read | `Document.Read` | `Document.Read.Role` |
+| Document archive | `Document.Archive` | `Document.Archive.Role` |
+| Data-point read | `DataPoints.Read` | `DataPoints.Read.Role` |
+| Administrative purge | `Admin.Purge` | `Admin.Purge.Role` (not granted to UI v1) |
 
-For a delegated token, production requires both the requested scope and the
-matching assigned app role. For an app-only token, it requires an exact
-allowlisted client ID, the matching application role, `idtyp=app`, and
+For canonical permission `P`, a delegated token requires scope `P` and assigned
+app role `P.Role`. The Azure boundary accepts only that exact suffix and
+normalizes it back to `P` for the private domain seam. For an app-only token,
+it requires an exact allowlisted client ID, role `P.Role`, `idtyp=app`, and
 `azpacr=2`. The last claim proves certificate authentication; a client-secret
 token is rejected even if Entra issued it. This prevents tenant-wide consent
 from granting every user every operation. Hiding a UI control is not
