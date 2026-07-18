@@ -314,7 +314,7 @@ def validate_azure_control_plane() -> None:
     development_requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
     for required_pin in (
         "azure-identity==1.25.3",
-        "boto3==1.43.49",
+        "boto3==1.43.51",
         "fastapi==0.139.1",
         "PyJWT[crypto]==2.13.0",
         "starlette==1.3.1",
@@ -323,7 +323,7 @@ def validate_azure_control_plane() -> None:
         require(required_pin in runtime_requirements, f"Reviewed Azure runtime pin is missing: {required_pin}")
     for required_pin in (
         "azure-identity==1.25.3",
-        "boto3==1.43.49",
+        "boto3==1.43.51",
         "fastapi==0.139.1",
         "httpx2==2.7.0",
         "PyJWT[crypto]==2.13.0",
