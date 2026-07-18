@@ -122,6 +122,69 @@ function Assert-Command {
     }
 }
 
+function Resolve-AzureCliLaunch {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$CommandSource)
+
+    if ([System.IO.Path]::GetExtension($CommandSource).Equals('.cmd', [StringComparison]::OrdinalIgnoreCase)) {
+        $wrapperDirectory = Split-Path -Parent $CommandSource
+        $installationDirectory = Split-Path -Parent $wrapperDirectory
+        $pythonPath = [System.IO.Path]::GetFullPath((Join-Path $installationDirectory 'python.exe'))
+        if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+            throw "Azure CLI command wrapper '$CommandSource' does not have the expected bundled Python engine. Repair the Azure CLI installation."
+        }
+        return [pscustomobject]@{
+            FilePath = $pythonPath
+            PrefixArguments = @('-IBm', 'azure.cli')
+            Installer = 'MSI'
+        }
+    }
+
+    return [pscustomobject]@{
+        FilePath = $CommandSource
+        PrefixArguments = @()
+        Installer = ''
+    }
+}
+
+function Invoke-AzureCliLaunch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Launch,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $hadInstaller = Test-Path Env:AZ_INSTALLER
+    $previousInstaller = $env:AZ_INSTALLER
+    $exitCode = -1
+    try {
+        if ($launch.Installer) { $env:AZ_INSTALLER = $launch.Installer }
+        $allArguments = @($launch.PrefixArguments) + $Arguments
+        $output = & $launch.FilePath @allArguments
+        $exitCode = $LASTEXITCODE
+    } finally {
+        if ($hadInstaller) {
+            $env:AZ_INSTALLER = $previousInstaller
+        } else {
+            Remove-Item Env:AZ_INSTALLER -ErrorAction SilentlyContinue
+        }
+    }
+    if ($exitCode -ne 0) {
+        $operation = ($Arguments | Select-Object -First 2) -join ' '
+        throw "Azure CLI failed while running 'az $operation'."
+    }
+    return $output
+}
+
+function Invoke-AzureCli {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $command = Get-Command az -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $launch = Resolve-AzureCliLaunch -CommandSource $command.Source
+    return Invoke-AzureCliLaunch -Launch $launch -Arguments $Arguments
+}
+
 function Invoke-Aws {
     [CmdletBinding()]
     param(
@@ -322,4 +385,4 @@ function Get-StackOutputs {
     return $result
 }
 
-Export-ModuleMember -Function Get-ProjectRoot, Read-EnvironmentConfig, Assert-Command, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
+Export-ModuleMember -Function Get-ProjectRoot, Read-EnvironmentConfig, Assert-Command, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs

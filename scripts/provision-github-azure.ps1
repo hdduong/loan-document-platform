@@ -109,8 +109,7 @@ function Invoke-Graph {
         $json = $Body | ConvertTo-Json -Depth 30 -Compress
         $arguments += @('--headers', 'Content-Type=application/json', '--body', $json)
     }
-    $raw = & az @arguments
-    if ($LASTEXITCODE -ne 0) { throw "Microsoft Graph request failed: $Method $Uri" }
+    $raw = Invoke-AzureCli -Arguments $arguments
     if ([string]::IsNullOrWhiteSpace(($raw | Out-String))) { return $null }
     return ($raw | Out-String | ConvertFrom-Json -Depth 50)
 }
@@ -254,13 +253,13 @@ $roleBody = [ordered]@{
 }
 if ($PSCmdlet.ShouldProcess($roleName, 'Create or update resource-group deployment role')) {
     $roleJson = $roleBody | ConvertTo-Json -Depth 30 -Compress
-    & az rest `
-        --method PUT `
-        --url "https://management.azure.com${roleDefinitionId}?api-version=2022-04-01" `
-        --headers Content-Type=application/json `
-        --body $roleJson `
-        --output none
-    if ($LASTEXITCODE -ne 0) { throw "Failed to create or update custom Azure role '$roleName'." }
+    Invoke-AzureCli -Arguments @(
+        'rest', '--method', 'PUT',
+        '--url', "https://management.azure.com${roleDefinitionId}?api-version=2022-04-01",
+        '--headers', 'Content-Type=application/json',
+        '--body', $roleJson,
+        '--output', 'none'
+    ) | Out-Null
 }
 
 function Ensure-RoleAssignment {

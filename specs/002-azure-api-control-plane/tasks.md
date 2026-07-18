@@ -159,6 +159,15 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 8: Windows Azure CLI Invocation Remediation
+
+**Purpose**: Preserve literal Graph query and JSON arguments when PowerShell provisioning runs with the Windows MSI Azure CLI.
+
+- [x] T051 [P] [US4] Add cross-platform regression tests for literal Azure CLI arguments and Windows `az.cmd` launch resolution in `tests/test_powershell_deployment_helpers.py`
+- [x] T052 [US4] Add the shared safe Azure CLI launcher in `scripts/common.psm1`, route Entra Graph and Azure role REST calls through it, and document the Windows MSI behavior in `specs/002-azure-api-control-plane/quickstart.md`
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

@@ -18,7 +18,7 @@ The migration deliberately keeps one registry in DynamoDB. Moving the API runtim
 
 **Storage**: Existing DynamoDB single-table registry/idempotency/outbox and versioned SSE-KMS S3 quarantine/artifact/IDP buckets; Azure Log Analytics/Application Insights for telemetry only; no second product registry
 
-**Testing**: pytest, FastAPI `TestClient`/HTTPX, botocore stubs/fakes, coverage.py per-file and aggregate gates, Ruff, OpenAPI validator, `az bicep build`, cfn-lint, PowerShell parser tests, and conditional Vitest/Playwright for browser changes
+**Testing**: pytest, FastAPI `TestClient`/HTTPX, botocore stubs/fakes, coverage.py per-file and aggregate gates, Ruff, OpenAPI validator, `az bicep build`, cfn-lint, PowerShell parser tests, Azure CLI literal-argument/Windows-launcher regression tests, and conditional Vitest/Playwright for browser changes
 
 **Target Platform**: Linux container on Azure Container Apps with a user-assigned managed identity and Azure-managed custom-domain certificate; retained AWS workload in `us-west-2`; Azure region is an environment input with `westus2` as the non-binding example
 
@@ -85,6 +85,8 @@ The headless deployment removes AppSync, and the optional private Jobs REST API 
 Keep the current AWS stack name and stateful logical IDs while changing `infra/api/template.yaml` into a private data/processing runtime plus the Azure workload OIDC provider/role. This avoids replacing existing buckets, table, KMS key, processors, or backup resources. A clean deployment never creates an AWS product API. Operators migrating a legacy deployed stack must stage Azure acceptance and legacy-resource cleanup as separately reviewed releases; the one-shot clean-deployment orchestrator does not claim application rollback to an endpoint that this repository cannot deploy.
 
 Add `infra/azure/main.bicep` for the resource group deployment: user-assigned runtime identity, registry, Log Analytics, Container Apps environment/application, autoscaling, ingress auth, diagnostics/alerts, Static Web App placeholder, and safe outputs. Image build/push and custom-hostname managed-certificate binding are scripted because they require created-resource/DNS ordering. Deployment automation uses separate GitHub-to-Azure and GitHub-to-AWS OIDC identities.
+
+PowerShell automation routes Azure CLI calls that carry Graph query strings or JSON bodies through a shared launcher. On Windows MSI installations the launcher resolves the Python engine used by `az.cmd` and invokes `azure.cli` directly, preventing `cmd.exe` from interpreting `&`, `$`, quotes, or JSON punctuation. Other installations invoke the resolved native `az` application with the same argument array. Resolution failure stops provisioning before any identity mutation.
 
 ## Project Structure
 
