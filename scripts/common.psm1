@@ -122,6 +122,101 @@ function Assert-Command {
     }
 }
 
+function Resolve-AzureCliLaunch {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$CommandSource)
+
+    if ([System.IO.Path]::GetExtension($CommandSource).Equals('.cmd', [StringComparison]::OrdinalIgnoreCase)) {
+        $wrapperDirectory = Split-Path -Parent $CommandSource
+        $installationDirectory = Split-Path -Parent $wrapperDirectory
+        $pythonPath = [System.IO.Path]::GetFullPath((Join-Path $installationDirectory 'python.exe'))
+        if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+            throw "Azure CLI command wrapper '$CommandSource' does not have the expected bundled Python engine. Repair the Azure CLI installation."
+        }
+        return [pscustomobject]@{
+            FilePath = $pythonPath
+            PrefixArguments = @('-IBm', 'azure.cli')
+            Installer = 'MSI'
+        }
+    }
+
+    return [pscustomobject]@{
+        FilePath = $CommandSource
+        PrefixArguments = @()
+        Installer = ''
+    }
+}
+
+function Get-AzureCliFailureContext {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    if ($Arguments.Count -eq 0) { return 'unknown operation' }
+    if ($Arguments[0] -ne 'rest') {
+        return ($Arguments | Select-Object -First 2) -join ' '
+    }
+
+    $method = 'UNKNOWN'
+    $target = ''
+    for ($index = 1; $index -lt $Arguments.Count - 1; $index++) {
+        if ($Arguments[$index] -eq '--method') { $method = $Arguments[$index + 1].ToUpperInvariant() }
+        if ($Arguments[$index] -in @('--uri', '--url')) { $target = $Arguments[$index + 1] }
+    }
+    if ([string]::IsNullOrWhiteSpace($target)) { return "rest $method" }
+
+    $parsedTarget = $null
+    if (-not [uri]::TryCreate($target, [UriKind]::Absolute, [ref]$parsedTarget)) {
+        return "rest $method remote-endpoint"
+    }
+    $safeHost = if ($parsedTarget.Host -in @('graph.microsoft.com', 'management.azure.com')) {
+        $parsedTarget.Host
+    } else {
+        'remote-endpoint'
+    }
+    $safePath = $parsedTarget.AbsolutePath
+    $safePath = $safePath -replace '(?i)(/subscriptions|/resourceGroups)/[^/]+', '$1/{id}'
+    $safePath = $safePath -replace '(?i)(?<=/)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=/|$)', '{id}'
+    return "rest $method $safeHost$safePath"
+}
+
+function Invoke-AzureCliLaunch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Launch,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $hadInstaller = Test-Path Env:AZ_INSTALLER
+    $previousInstaller = $env:AZ_INSTALLER
+    $exitCode = -1
+    try {
+        if ($launch.Installer) { $env:AZ_INSTALLER = $launch.Installer }
+        $allArguments = @($launch.PrefixArguments) + $Arguments
+        $output = & $launch.FilePath @allArguments
+        $exitCode = $LASTEXITCODE
+    } finally {
+        if ($hadInstaller) {
+            $env:AZ_INSTALLER = $previousInstaller
+        } else {
+            Remove-Item Env:AZ_INSTALLER -ErrorAction SilentlyContinue
+        }
+    }
+    if ($exitCode -ne 0) {
+        $operation = Get-AzureCliFailureContext -Arguments $Arguments
+        throw "Azure CLI failed while running 'az $operation'."
+    }
+    return $output
+}
+
+function Invoke-AzureCli {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $command = Get-Command az -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $launch = Resolve-AzureCliLaunch -CommandSource $command.Source
+    return Invoke-AzureCliLaunch -Launch $launch -Arguments $Arguments
+}
+
 function Invoke-Aws {
     [CmdletBinding()]
     param(
@@ -322,4 +417,4 @@ function Get-StackOutputs {
     return $result
 }
 
-Export-ModuleMember -Function Get-ProjectRoot, Read-EnvironmentConfig, Assert-Command, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
+Export-ModuleMember -Function Get-ProjectRoot, Read-EnvironmentConfig, Assert-Command, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs

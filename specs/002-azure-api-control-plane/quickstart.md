@@ -15,6 +15,8 @@ The commands below must be run from the repository root. Never paste a bearer to
 
 Use separate, least-privilege identities for GitHub deployment and the Azure API runtime. Do not create an AWS access key, Entra client secret, or reusable cross-cloud certificate for the Azure API.
 
+On Windows, run every repository script from PowerShell 7 (`pwsh`), not Windows PowerShell 5.1. The shared Azure CLI launcher bypasses the MSI `az.cmd` wrapper for Graph query strings and JSON bodies so `cmd.exe` cannot reinterpret `&`, `$`, quotes, or JSON punctuation. Do not work around a launcher failure by manually escaping a Graph URI or disabling certificate validation; repair the Azure CLI installation or trusted CA bundle and rerun the idempotent phase.
+
 ## 1. Read the authoritative artifacts
 
 Read these before changing or deploying the feature:
@@ -36,6 +38,7 @@ Install the pinned development dependencies, then run every repository gate:
 ./.venv/Scripts/python.exe -m pip install --disable-pip-version-check -r requirements-dev.txt
 ./.venv/Scripts/python.exe scripts/validate-repository.py
 ./scripts/test-powershell-syntax.ps1
+./.venv/Scripts/python.exe -m pytest -q tests/test_powershell_deployment_helpers.py
 ./.venv/Scripts/python.exe -m compileall -q services scripts
 ./.venv/Scripts/ruff.exe check services scripts tests
 ./.venv/Scripts/pytest.exe -q --cov=services --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
@@ -188,6 +191,14 @@ It must enforce this order:
 9. Publish the SPA/runtime configuration after the Azure API hostname is healthy.
 
 Use the individual scripts only to resume a failed phase. `scripts/provision-entra.ps1`, `scripts/deploy-azure.ps1`, `scripts/deploy-platform.ps1`, and `scripts/deploy-idp.ps1` are idempotent, but manually changing their order can create an untrusted workload or an IDP stack with incomplete hook/bucket permissions. A direct first-install platform pass must explicitly use `deploy-platform.ps1 -AllowMissingIdp`; every reuse, `-SkipIdp`, and post-IDP pass must omit that switch so missing outputs or lookup failures stop deployment and the deployed IDP wiring is verified.
+
+To resume only the Entra phase on Windows, use a single PowerShell 7 command; an MSI `az.cmd` entrypoint reported by `Get-Command az` is supported by the shared launcher:
+
+```powershell
+./scripts/provision-entra.ps1 -EnvironmentFile ./config/environments/dev.json -OutputFile ./.local/entra-dev.json
+```
+
+Do not remove OData options such as `$select`, manually escape generated Graph values, or alter `PATH` as a workaround.
 
 ## 6. Verify the headless IDP boundary
 
