@@ -147,11 +147,15 @@ def test_failed_msi_launch_restores_installer(tmp_path: Path) -> None:
         "[Environment]::GetEnvironmentVariable('TEST_AZ_FAILURE')); Installer = 'MSI' }; "
         "$env:AZ_INSTALLER = 'original'; "
         "$failedClosed = $false; "
-        "try { & $module { param($spec) "
-        "Invoke-AzureCliLaunch -Launch $spec -Arguments @('rest', '--method', 'GET') "
-        "} $launch | Out-Null } catch { $failedClosed = $true }; "
+        "$message = ''; "
+        "$uri = 'https://graph.microsoft.com/v1.0/applications/"
+        "11111111-1111-1111-1111-111111111111?`$filter=private&`$select=id'; "
+        "try { & $module { param($spec, $target) "
+        "Invoke-AzureCliLaunch -Launch $spec -Arguments "
+        "@('rest', '--method', 'GET', '--uri', $target, '--body', '{\"private\":true}') "
+        "} $launch $uri | Out-Null } catch { $failedClosed = $true; $message = $_.Exception.Message }; "
         "$result = [pscustomobject]@{ FailedClosed = $failedClosed; "
-        "After = $env:AZ_INSTALLER }; "
+        "After = $env:AZ_INSTALLER; Message = $message }; "
         "[Console]::Out.Write(($result | ConvertTo-Json -Compress))"
     )
     environment = os.environ.copy()
@@ -159,7 +163,12 @@ def test_failed_msi_launch_restores_installer(tmp_path: Path) -> None:
 
     result = json.loads(run_powershell(script, environment=environment))
 
-    assert result == {"FailedClosed": True, "After": "original"}
+    assert result["FailedClosed"] is True
+    assert result["After"] == "original"
+    assert "az rest GET graph.microsoft.com/v1.0/applications/{id}" in result["Message"]
+    assert "11111111-1111-1111-1111-111111111111" not in result["Message"]
+    assert "$filter" not in result["Message"]
+    assert "private" not in result["Message"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX fake executable exercises the native az path")
@@ -213,6 +222,7 @@ def test_graph_provisioning_uses_safe_azure_cli_launcher(relative_path: str) -> 
     source = (ROOT / relative_path).read_text(encoding="utf-8")
 
     assert "$raw = Invoke-AzureCli -Arguments $arguments" in source
+    assert 'throw "Microsoft Graph $Method request failed.' in source
     assert "$raw = & az @arguments" not in source
 
 
@@ -222,6 +232,7 @@ def test_custom_role_rest_call_uses_safe_azure_cli_launcher() -> None:
     )
 
     assert "Invoke-AzureCli -Arguments @(" in source
+    assert "Failed to create or update the custom Azure deployment role." in source
     assert "& az rest" not in source
 
 

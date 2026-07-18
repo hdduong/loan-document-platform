@@ -147,6 +147,38 @@ function Resolve-AzureCliLaunch {
     }
 }
 
+function Get-AzureCliFailureContext {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    if ($Arguments.Count -eq 0) { return 'unknown operation' }
+    if ($Arguments[0] -ne 'rest') {
+        return ($Arguments | Select-Object -First 2) -join ' '
+    }
+
+    $method = 'UNKNOWN'
+    $target = ''
+    for ($index = 1; $index -lt $Arguments.Count - 1; $index++) {
+        if ($Arguments[$index] -eq '--method') { $method = $Arguments[$index + 1].ToUpperInvariant() }
+        if ($Arguments[$index] -in @('--uri', '--url')) { $target = $Arguments[$index + 1] }
+    }
+    if ([string]::IsNullOrWhiteSpace($target)) { return "rest $method" }
+
+    $parsedTarget = $null
+    if (-not [uri]::TryCreate($target, [UriKind]::Absolute, [ref]$parsedTarget)) {
+        return "rest $method remote-endpoint"
+    }
+    $safeHost = if ($parsedTarget.Host -in @('graph.microsoft.com', 'management.azure.com')) {
+        $parsedTarget.Host
+    } else {
+        'remote-endpoint'
+    }
+    $safePath = $parsedTarget.AbsolutePath
+    $safePath = $safePath -replace '(?i)(/subscriptions|/resourceGroups)/[^/]+', '$1/{id}'
+    $safePath = $safePath -replace '(?i)(?<=/)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=/|$)', '{id}'
+    return "rest $method $safeHost$safePath"
+}
+
 function Invoke-AzureCliLaunch {
     [CmdletBinding()]
     param(
@@ -170,7 +202,7 @@ function Invoke-AzureCliLaunch {
         }
     }
     if ($exitCode -ne 0) {
-        $operation = ($Arguments | Select-Object -First 2) -join ' '
+        $operation = Get-AzureCliFailureContext -Arguments $Arguments
         throw "Azure CLI failed while running 'az $operation'."
     }
     return $output
