@@ -26,6 +26,20 @@ def platform_event_filter_template(pattern: str = VALID_UPLOAD_FILTER) -> str:
 """
 
 
+def platform_sam_event_filter_template(pattern: str) -> str:
+    return platform_event_filter_template() + f"""  SecondaryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Events:
+        SecondaryStream:
+          Type: DynamoDB
+          Properties:
+            FilterCriteria:
+              Filters:
+                - Pattern: '{pattern}'
+"""
+
+
 def platform_api_handler_template(
     table_name: str = "loan-document-${EnvironmentName}-registry",
     bucket_name: str = (
@@ -323,6 +337,19 @@ def test_platform_event_source_filter_contract_rejects_nonstandard_json_constant
 
     with pytest.raises(ValueError, match="valid JSON with unique object keys"):
         validator.validate_platform_event_source_filters(template)
+
+
+def test_platform_event_source_filter_contract_parses_sam_function_events() -> None:
+    validator = load_validator()
+
+    validator.validate_platform_event_source_filters(
+        platform_sam_event_filter_template('{"value":["expected"]}')
+    )
+
+    with pytest.raises(ValueError, match="valid JSON with unique object keys"):
+        validator.validate_platform_event_source_filters(
+            platform_sam_event_filter_template('{"value":["extra-brace"]}}')
+        )
 
 
 def test_platform_packaging_contract_is_exact() -> None:

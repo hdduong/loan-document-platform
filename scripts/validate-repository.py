@@ -409,22 +409,16 @@ def validate_platform_event_source_filters(template_text: str) -> None:
     def reject_nonstandard_constant(_constant: str) -> None:
         raise ValueError("non-standard JSON constant")
 
-    for logical_id, resource in resources.items():
-        if not isinstance(resource, dict) or resource.get("Type") != "AWS::Lambda::EventSourceMapping":
-            continue
-        properties = resource.get("Properties")
-        criteria = properties.get("FilterCriteria") if isinstance(properties, dict) else None
-        if criteria is None:
-            continue
+    def parse_filter_criteria(logical_path: str, criteria: Any) -> list[dict[str, Any]]:
         filters = criteria.get("Filters") if isinstance(criteria, dict) else None
         require(
             isinstance(criteria, dict)
             and set(criteria) == {"Filters"}
             and isinstance(filters, list)
             and 1 <= len(filters) <= 5,
-            f"{logical_id} FilterCriteria must contain between one and five Filters.",
+            f"{logical_path} FilterCriteria must contain between one and five Filters.",
         )
-        parsed_filters[logical_id] = []
+        parsed: list[dict[str, Any]] = []
         for filter_definition in filters:
             pattern = (
                 filter_definition.get("Pattern")
@@ -435,7 +429,7 @@ def validate_platform_event_source_filters(template_text: str) -> None:
                 isinstance(filter_definition, dict)
                 and set(filter_definition) == {"Pattern"}
                 and isinstance(pattern, str),
-                f"{logical_id} filters must contain one literal Pattern string.",
+                f"{logical_path} filters must contain one literal Pattern string.",
             )
             try:
                 parsed_pattern = json.loads(
@@ -445,13 +439,48 @@ def validate_platform_event_source_filters(template_text: str) -> None:
                 )
             except (json.JSONDecodeError, ValueError) as exc:
                 raise ValueError(
-                    f"{logical_id} filter Pattern must be valid JSON with unique object keys."
+                    f"{logical_path} filter Pattern must be valid JSON with unique object keys."
                 ) from exc
             require(
                 isinstance(parsed_pattern, dict),
-                f"{logical_id} filter Pattern must decode to a JSON object.",
+                f"{logical_path} filter Pattern must decode to a JSON object.",
             )
-            parsed_filters[logical_id].append(parsed_pattern)
+            parsed.append(parsed_pattern)
+        return parsed
+
+    for logical_id, resource in resources.items():
+        if not isinstance(resource, dict):
+            continue
+        properties = resource.get("Properties")
+        if not isinstance(properties, dict):
+            continue
+        if resource.get("Type") == "AWS::Lambda::EventSourceMapping":
+            criteria = properties.get("FilterCriteria")
+            if criteria is not None:
+                parsed_filters[logical_id] = parse_filter_criteria(logical_id, criteria)
+        if resource.get("Type") != "AWS::Serverless::Function" or "Events" not in properties:
+            continue
+        events = properties.get("Events")
+        require(
+            isinstance(events, dict),
+            f"{logical_id} SAM Events must use literal event definitions.",
+        )
+        for event_id, event_definition in events.items():
+            event_properties = (
+                event_definition.get("Properties")
+                if isinstance(event_definition, dict)
+                else None
+            )
+            criteria = (
+                event_properties.get("FilterCriteria")
+                if isinstance(event_properties, dict)
+                else None
+            )
+            if criteria is not None:
+                logical_path = f"{logical_id}.Events.{event_id}"
+                parsed_filters[logical_path] = parse_filter_criteria(
+                    logical_path, criteria
+                )
 
     expected_upload_filter = {
         "eventName": ["INSERT", "MODIFY"],
