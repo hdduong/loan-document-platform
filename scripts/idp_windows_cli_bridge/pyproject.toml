@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idp-windows-cli-bridge"
+version = "1.0.0"
+description = "Native Windows console entry points for pinned IDP child tools"
+requires-python = ">=3.12,<3.13"
+
+[project.scripts]
+sam = "idp_windows_cli_bridge:main"
+npm = "idp_windows_cli_bridge:main"
+
+[tool.setuptools]
+py-modules = ["idp_windows_cli_bridge"]

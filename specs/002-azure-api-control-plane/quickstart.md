@@ -205,6 +205,17 @@ NumPy 1.26.4, and temporarily exposes that environment to child SAM builds. Do
 not remove `[all]`, relax NumPy, or install a compiler to force the pinned release
 onto Python 3.13.
 
+On Windows, leave the installed `sam.cmd`, `node.exe`, and `npm.cmd` locations
+on `PATH`. The deployment script validates those installations and places
+reviewed native `sam.exe`/`npm.exe` relays only in the managed `py312` virtual
+environment because the upstream publisher cannot execute `.cmd` directly.
+The relays do not use `cmd.exe` or change the vendor source; their source digests
+is part of the local cache identity, and the script verifies both versions
+before publishing. If validation reports an unsupported layout, repair or
+reinstall the official SAM CLI or Node.js distribution rather than copying or
+editing launchers. If only the local relay cache is stale, rerun
+`scripts/deploy-idp.ps1 -ReinstallCli`.
+
 To resume only the Entra phase on Windows, use a single PowerShell 7 command; an MSI `az.cmd` entrypoint reported by `Get-Command az` is supported by the shared launcher:
 
 ```powershell

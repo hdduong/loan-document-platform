@@ -192,19 +192,149 @@ function Resolve-PythonLaunch {
     throw "Python $Version is required for the pinned IDP CLI. Install that exact minor version without replacing the platform's Python 3.13 runtime."
 }
 
+function Resolve-CommandSourceOutsidePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ExcludedDirectory
+    )
+
+    $excluded = [IO.Path]::GetFullPath($ExcludedDirectory).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    ) + [IO.Path]::DirectorySeparatorChar
+    $pathComparison = if ($IsWindows) {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    foreach ($command in @(Get-Command $Name -CommandType Application -All -ErrorAction SilentlyContinue)) {
+        if ([string]::IsNullOrWhiteSpace([string]$command.Source) -or
+            -not [IO.Path]::IsPathFullyQualified([string]$command.Source) -or
+            -not (Test-Path -LiteralPath $command.Source -PathType Leaf)) {
+            continue
+        }
+        $source = (Resolve-Path -LiteralPath $command.Source).Path
+        if (-not $source.StartsWith($excluded, $pathComparison)) {
+            return $source
+        }
+    }
+
+    throw "Command '$Name' was not found outside the managed IDP CLI environment."
+}
+
+function Resolve-WindowsIdpCliBridge {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SamCommandSource,
+        [Parameter(Mandatory)][string]$NodeCommandSource,
+        [Parameter(Mandatory)][string]$NpmCommandSource
+    )
+
+    foreach ($source in @($SamCommandSource, $NodeCommandSource, $NpmCommandSource)) {
+        if (-not [IO.Path]::IsPathFullyQualified($source) -or
+            -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Windows IDP child-tool source '$source' must be an absolute file."
+        }
+    }
+
+    $samNativeExecutablePath = $null
+    $samPythonPath = $null
+    if ([IO.Path]::GetExtension($SamCommandSource).Equals('.exe', [StringComparison]::OrdinalIgnoreCase)) {
+        $samNativeExecutablePath = $SamCommandSource
+    } else {
+        if (-not [IO.Path]::GetExtension($SamCommandSource).Equals('.cmd', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The Windows SAM CLI command '$SamCommandSource' is not a native executable or supported official wrapper."
+        }
+        $wrapper = (Get-Content -Raw -LiteralPath $SamCommandSource).Replace('\', '/')
+        if ($wrapper -notmatch '"%~dp0/\.\./runtime/python\.exe"\s+-m\s+samcli\s+%\*') {
+            throw "The Windows SAM CLI wrapper '$SamCommandSource' does not match the reviewed official launcher layout."
+        }
+        $samPythonPath = [IO.Path]::GetFullPath(
+            (Join-Path (Split-Path -Parent $SamCommandSource) '../runtime/python.exe')
+        )
+        if (-not (Test-Path -LiteralPath $samPythonPath -PathType Leaf)) {
+            throw "The Windows SAM CLI wrapper '$SamCommandSource' has no bundled Python runtime."
+        }
+        $samModulePath = Join-Path (Split-Path -Parent $samPythonPath) 'Lib/site-packages/samcli'
+        if (-not (Test-Path -LiteralPath $samModulePath -PathType Container)) {
+            throw "The Windows SAM CLI wrapper '$SamCommandSource' has no bundled samcli module."
+        }
+    }
+
+    $npmNativeExecutablePath = $null
+    $nodeExecutablePath = $null
+    $npmCliPath = $null
+    if ([IO.Path]::GetExtension($NpmCommandSource).Equals('.exe', [StringComparison]::OrdinalIgnoreCase)) {
+        $npmNativeExecutablePath = $NpmCommandSource
+    } else {
+        if (-not [IO.Path]::GetExtension($NpmCommandSource).Equals('.cmd', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The Windows npm command '$NpmCommandSource' is not a native executable or supported official wrapper."
+        }
+        if (-not [IO.Path]::GetExtension($NodeCommandSource).Equals('.exe', [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $NodeCommandSource -PathType Leaf)) {
+            throw "The Windows npm bridge requires a native Node.js executable."
+        }
+        $nodeDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $NodeCommandSource))
+        $npmDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $NpmCommandSource))
+        if (-not $nodeDirectory.Equals($npmDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The Windows npm wrapper and native Node.js executable must share an installation directory."
+        }
+        $npmCliPath = Join-Path (Split-Path -Parent $NodeCommandSource) 'node_modules/npm/bin/npm-cli.js'
+        if (-not (Test-Path -LiteralPath $npmCliPath -PathType Leaf)) {
+            throw "The Windows Node.js installation has no npm CLI module."
+        }
+        $nodeExecutablePath = $NodeCommandSource
+    }
+
+    return [pscustomobject]@{
+        BridgeRequired = $null -ne $samPythonPath -or $null -ne $npmCliPath
+        SamNativeExecutablePath = $samNativeExecutablePath
+        SamPythonPath = $samPythonPath
+        NpmNativeExecutablePath = $npmNativeExecutablePath
+        NodeExecutablePath = $nodeExecutablePath
+        NpmCliPath = $npmCliPath
+    }
+}
+
 function Invoke-WithPrependedPath {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][scriptblock]$ScriptBlock
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+        [hashtable]$Environment = @{}
     )
 
     $resolved = (Resolve-Path -LiteralPath $Path).Path
     $originalPath = $env:PATH
+    $originalEnvironment = @{}
     try {
         $env:PATH = "$resolved$([IO.Path]::PathSeparator)$originalPath"
+        foreach ($name in $Environment.Keys) {
+            if ([string]::IsNullOrWhiteSpace([string]$name) -or
+                [string]$name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or
+                [string]$name -ieq 'PATH') {
+                throw "Invalid scoped process environment variable '$name'."
+            }
+            $originalEnvironment[$name] = @{
+                Exists = Test-Path -LiteralPath "Env:$name"
+                Value = [Environment]::GetEnvironmentVariable($name, 'Process')
+            }
+            [Environment]::SetEnvironmentVariable($name, [string]$Environment[$name], 'Process')
+        }
         & $ScriptBlock
     } finally {
+        foreach ($name in $originalEnvironment.Keys) {
+            if ($originalEnvironment[$name].Exists) {
+                [Environment]::SetEnvironmentVariable(
+                    $name,
+                    [string]$originalEnvironment[$name].Value,
+                    'Process'
+                )
+            } else {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
+        }
         $env:PATH = $originalPath
     }
 }
@@ -533,4 +663,4 @@ function Get-StackOutputs {
     return $result
 }
 
-Export-ModuleMember -Function Get-ProjectRoot, Get-NormalizedTextSha256, Read-EnvironmentConfig, Assert-Command, Resolve-PythonLaunch, Invoke-WithPrependedPath, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
+Export-ModuleMember -Function Get-ProjectRoot, Get-NormalizedTextSha256, Read-EnvironmentConfig, Assert-Command, Resolve-PythonLaunch, Resolve-CommandSourceOutsidePath, Resolve-WindowsIdpCliBridge, Invoke-WithPrependedPath, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs

@@ -110,6 +110,9 @@ only short-lived, object-constrained S3 grants—never AWS credentials.
 3. Run `scripts/bootstrap.ps1 -InstallMissing`; it keeps Python 3.13 for the
    platform and installs a separate Python 3.12 runtime for the pinned IDP CLI.
    Then run it with the ignored environment file to verify both cloud identities.
+   On Windows, `deploy-idp.ps1` validates the installed SAM/Node/npm layout and
+   creates digest-bound native child-tool relays inside only the managed Python
+   3.12 environment; it does not patch vendor source or invoke `cmd.exe`.
 4. Run `scripts/provision-github.ps1` to create/configure the public repository,
    protected environment, exact GitHub-to-AWS OIDC role, and AWS bootstrap.
 5. Run `scripts/configure-github-protection.ps1` after the reviewed baseline is

@@ -145,6 +145,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **FR-037**: Every Lambda event-source filter in the platform template MUST be a literal, syntactically valid JSON object with unique keys before packaging; the upload-completion mapping MUST match only DynamoDB `INSERT` or `MODIFY` records whose new image is an `UPLOAD` in `VALIDATING` status.
 - **FR-038**: IDP configuration generation, repository validation, and deployment preflight MUST verify manifest SHA-256 values using the same strict UTF-8, LF-normalized text bytes; raw checkout line endings MUST NOT change the reviewed identity, and invalid UTF-8 MUST fail before build or upload.
 - **FR-039**: The pinned IDP 0.5.16 CLI and source-build tooling MUST use an exact Python 3.12 virtual environment while platform code and validation remain on Python 3.13; deployment MUST retain the reviewed `[all]` dependencies, verify NumPy 1.26.4 and dependency consistency, reject stale or wrong-minor environments, and restore the process path after child builds.
+- **FR-040**: On Windows, IDP deployment MUST validate the installed SAM and Node/npm topology, exclude the managed IDP virtual environment while resolving underlying tools, and install reviewed native `sam.exe` and `npm.exe` console entry points into that environment. Those entry points MUST relay exact argument lists without a command shell, reject relative, missing, or self-referencing targets, use only scoped UTF-8/tool-target environment values, restore process state after success or failure, and bind their normalized source digests to the CLI cache identity before marking the cache complete.
 
 ### Key Entities
 
@@ -185,6 +186,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **SC-023**: Structured filter tests reject malformed delimiters, duplicate JSON keys, non-object patterns, and semantic drift from the exact upload-completion DynamoDB event contract before CloudFormation deployment.
 - **SC-024**: PowerShell helper tests prove LF, CRLF, and CR encodings of identical reviewed text produce one manifest digest, invalid UTF-8 is rejected, and both IDP generation and deployment use the shared normalized-digest helper.
 - **SC-025**: Repository and PowerShell-helper tests prove exact-minor Python resolution fails closed, the IDP cache is ABI-qualified, production installs Python 3.12 before restoring Python 3.13, pull-request validation remains on 3.13, and temporary path changes are restored after both successful and failed child operations.
+- **SC-026**: Python and PowerShell tests prove the Windows IDP bridge preserves metacharacter-bearing argument boundaries, never enables a command shell, propagates child exit codes, rejects self-targeting after pip strips the launcher `.exe` suffix, excludes activated/stale managed shims, validates SAM and npm layouts, restores scoped environment variables exactly, and passes native `sam --version` plus `npm --version` smoke checks before writing its digest-bound cache marker.
 
 ## Assumptions
 

@@ -1082,6 +1082,59 @@ def test_idp_python_toolchain_contract_rejects_runtime_drift() -> None:
         )
 
 
+def test_idp_windows_bridge_contract_rejects_shell_or_cache_drift() -> None:
+    validator = load_validator()
+    repository = Path(__file__).resolve().parents[1]
+    deploy = (repository / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
+    common = (repository / "scripts" / "common.psm1").read_text(encoding="utf-8")
+    bridge_project = (
+        repository / "scripts" / "idp_windows_cli_bridge" / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    bridge_source = (
+        repository / "scripts" / "idp_windows_cli_bridge" / "idp_windows_cli_bridge.py"
+    ).read_text(encoding="utf-8")
+
+    validator.validate_idp_windows_bridge_contract(
+        deploy, common, bridge_project, bridge_source
+    )
+
+    with pytest.raises(ValueError, match="uses a shell path"):
+        validator.validate_idp_windows_bridge_contract(
+            deploy,
+            common,
+            bridge_project,
+            bridge_source.replace("shell=False", "shell=True"),
+        )
+
+    with pytest.raises(ValueError, match="Every Windows topology"):
+        validator.validate_idp_windows_bridge_contract(
+            deploy + "\nif ($windowsCliBridge.BridgeRequired) {}",
+            common,
+            bridge_project,
+            bridge_source,
+        )
+
+    with pytest.raises(ValueError, match="explicitly cleared"):
+        validator.validate_idp_windows_bridge_contract(
+            deploy.replace(
+                "$cliEnvironment[$entry.Name] = [string]$entry.Value",
+                "if (-not [string]::IsNullOrWhiteSpace([string]$entry.Value)) { "
+                "$cliEnvironment[$entry.Name] = [string]$entry.Value }",
+            ),
+            common,
+            bridge_project,
+            bridge_source,
+        )
+
+    with pytest.raises(ValueError, match="deployment lacks"):
+        validator.validate_idp_windows_bridge_contract(
+            deploy.replace("$bridgeIdentity = ($bridgeSources", "$bridgeDigest = ($bridgeSources"),
+            common,
+            bridge_project,
+            bridge_source,
+        )
+
+
 def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypatch) -> None:
     validator = load_validator()
     repository = tmp_path / "repository"
@@ -1099,7 +1152,39 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             '".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag" '
             "lib/idp_common_pkg')[all] '-m', 'pip', 'check' "
             'm.version("numpy") == "1.26.4" '
-            "Invoke-WithPrependedPath -Path $venvExecutableDirectory -ScriptBlock"
+            "Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment "
+            "Resolve-CommandSourceOutsidePath -Name sam "
+            "Resolve-CommandSourceOutsidePath -Name node "
+            "Resolve-CommandSourceOutsidePath -Name npm "
+            "$bridgeSources = @( $bridgeIdentity = ($bridgeSources | ForEach-Object { "
+            "Get-NormalizedTextSha256 -Path $_ }) $expectedInstallIdentity = "
+            "'--no-deps', '--editable', $bridgePackageDirectory "
+            "$cliEnvironment = @{ PYTHONUTF8 = '1' } IDP_SAM_NATIVE_EXECUTABLE "
+            "IDP_SAM_CLI_PYTHON IDP_NPM_NATIVE_EXECUTABLE IDP_NODE_EXECUTABLE IDP_NPM_CLI_JS "
+            "$cliEnvironment[$entry.Name] = [string]$entry.Value "
+            "Invoke-Checked -Command sam -Arguments @('--version') "
+            "Invoke-Checked -Command npm -Arguments @('--version') "
+            "[IO.File]::WriteAllText($installMarker"
+        ),
+        "scripts/common.psm1": (
+            "function Resolve-CommandSourceOutsidePath -CommandType Application -All "
+            "function Resolve-WindowsIdpCliBridge %~dp0/ ../runtime/python.exe "
+            "Lib/site-packages/samcli node_modules/npm/bin/npm-cli.js "
+            "must share an installation directory Remove-Item -LiteralPath \"Env:$name\""
+        ),
+        "scripts/idp_windows_cli_bridge/pyproject.toml": (
+            'requires = ["setuptools==80.9.0"]\n'
+            'requires-python = ">=3.12,<3.13"\n'
+            'sam = "idp_windows_cli_bridge:main"\n'
+            'npm = "idp_windows_cli_bridge:main"\n'
+        ),
+        "scripts/idp_windows_cli_bridge/idp_windows_cli_bridge.py": (
+            'not path.is_absolute() if launcher_path.suffix.casefold() != ".exe" '
+            'candidates.append(Path(f"{launcher}.exe")) '
+            "if _targets_launcher(command[0], sys.argv[0]) "
+            "subprocess.run(command, check=False, shell=False) "
+            'return [python, "-m", "samcli", *arguments] '
+            "return [node, npm_cli, *arguments]"
         ),
         "scripts/bootstrap.ps1": (
             "Python.Python.3.13 Python.Python.3.12 "

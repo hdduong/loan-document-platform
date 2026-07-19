@@ -92,7 +92,12 @@ allowlisted, and `iam:PassRole` is limited to approved service principals.
    upload/activate `cd-screen-v1` and `cd-full-v1`. The script creates an
    ABI-qualified Python 3.12 virtual environment because IDP 0.5.16 pins NumPy
    1.26.4; it rejects Python 3.13 rather than compiling or changing that upstream
-   dependency. AppSync and Jobs REST are not enabled.
+   dependency. On Windows it validates the official SAM bundled runtime and the
+   Node/npm module layout, installs digest-bound native child-tool relays into
+   only that virtual environment, and smoke-tests both tools without `cmd.exe`
+   before publishing. AppSync and Jobs REST are not enabled. Repair the official
+   installation for a layout failure; use `-ReinstallCli` only to rebuild the
+   managed local environment and relays.
 10. Re-run `scripts/deploy-platform.ps1` without `-AllowMissingIdp`. This pass is
     required: it binds processor environment/IAM values to the deployed IDP
     buckets, KMS key, and state machine, then verifies the stored CloudFormation

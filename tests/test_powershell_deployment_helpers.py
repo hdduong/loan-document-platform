@@ -142,22 +142,316 @@ def test_prepend_path_helper_restores_process_path(tmp_path: Path, raise_inside:
     should_raise = "$true" if raise_inside else "$false"
     script = (
         f"Import-Module -Force '{module_path}'; "
-        "$before = $env:PATH; $global:IDP_TEST_INSIDE = ''; $caught = $false; "
+        "$before = $env:PATH; "
+        "$global:IDP_TEST_INSIDE = ''; $global:IDP_TEST_ENV_INSIDE = @{}; $caught = $false; "
         "try { Invoke-WithPrependedPath "
-        f"-Path '{prepend_path}' -ScriptBlock {{ "
+        f"-Path '{prepend_path}' -Environment @{{ IDP_TEST_EXISTING = 'inside-existing'; "
+        "IDP_TEST_ABSENT = 'inside-absent'; IDP_TEST_CLEARED = '' } -ScriptBlock { "
         "$global:IDP_TEST_INSIDE = ($env:PATH -split [IO.Path]::PathSeparator)[0]; "
+        "$global:IDP_TEST_ENV_INSIDE = @{ Existing = $env:IDP_TEST_EXISTING; "
+        "Absent = $env:IDP_TEST_ABSENT; Cleared = $env:IDP_TEST_CLEARED }; "
         f"if ({should_raise}) {{ throw 'expected' }} }} }} "
         "catch { if ($_.Exception.Message -eq 'expected') { $caught = $true } else { throw } }; "
         "$result = [pscustomobject]@{ Before = $before; After = $env:PATH; "
-        "Inside = $global:IDP_TEST_INSIDE; Caught = $caught }; "
+        "Inside = $global:IDP_TEST_INSIDE; Caught = $caught; "
+        "InsideExisting = $global:IDP_TEST_ENV_INSIDE.Existing; "
+        "InsideAbsent = $global:IDP_TEST_ENV_INSIDE.Absent; "
+        "InsideCleared = $global:IDP_TEST_ENV_INSIDE.Cleared; "
+        "AfterExisting = $env:IDP_TEST_EXISTING; "
+        "AfterCleared = $env:IDP_TEST_CLEARED; "
+        "AfterAbsent = [Environment]::GetEnvironmentVariable('IDP_TEST_ABSENT', 'Process') }; "
         "$result | ConvertTo-Json -Compress"
+    )
+    environment = os.environ.copy()
+    environment["IDP_TEST_EXISTING"] = "before-existing"
+    environment["IDP_TEST_CLEARED"] = "stale-value"
+    environment.pop("IDP_TEST_ABSENT", None)
+
+    result = json.loads(run_powershell(script, environment=environment))
+
+    assert result["Before"] == result["After"]
+    assert Path(result["Inside"]) == tmp_path
+    assert result["Caught"] is raise_inside
+    assert result["InsideExisting"] == "inside-existing"
+    assert result["InsideAbsent"] == "inside-absent"
+    assert result["InsideCleared"] == ""
+    assert result["AfterExisting"] == "before-existing"
+    assert result["AfterCleared"] == "stale-value"
+    assert result["AfterAbsent"] is None
+
+
+def test_command_source_resolver_excludes_an_activated_idp_venv(tmp_path: Path) -> None:
+    managed = tmp_path / "managed" / "Scripts"
+    external = tmp_path / "external"
+    managed.mkdir(parents=True)
+    external.mkdir()
+    suffix = ".exe" if os.name == "nt" else ""
+    managed_command = managed / f"idp-tool-source-test{suffix}"
+    external_command = external / f"idp-tool-source-test{suffix}"
+    executable_content = b"" if os.name == "nt" else b"#!/bin/sh\nexit 0\n"
+    managed_command.write_bytes(executable_content)
+    external_command.write_bytes(executable_content)
+    managed_command.chmod(0o755)
+    external_command.chmod(0o755)
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$source = Resolve-CommandSourceOutsidePath "
+        "-Name 'idp-tool-source-test' -ExcludedDirectory $env:TEST_EXCLUDED; "
+        "[Console]::Out.Write($source)"
+    )
+    environment = os.environ.copy()
+    environment["TEST_EXCLUDED"] = str(managed)
+    environment["PATH"] = os.pathsep.join([str(managed), str(external), environment["PATH"]])
+
+    result = run_powershell(script, environment=environment)
+
+    assert Path(result).resolve() == external_command.resolve()
+
+
+def test_prepend_path_helper_rejects_path_override_and_restores_path(tmp_path: Path) -> None:
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    prepend_path = str(tmp_path).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$before = $env:PATH; $message = ''; "
+        "try { Invoke-WithPrependedPath "
+        f"-Path '{prepend_path}' -Environment @{{ PATH = 'unsafe' }} "
+        "-ScriptBlock { throw 'must not run' } } catch { $message = $_.Exception.Message }; "
+        "[pscustomobject]@{ Before = $before; After = $env:PATH; Message = $message } "
+        "| ConvertTo-Json -Compress"
     )
 
     result = json.loads(run_powershell(script, environment=os.environ.copy()))
 
     assert result["Before"] == result["After"]
-    assert Path(result["Inside"]) == tmp_path
-    assert result["Caught"] is raise_inside
+    assert "Invalid scoped process environment variable 'PATH'" in result["Message"]
+
+
+def test_windows_idp_cli_bridge_resolves_reviewed_wrapper_layout(tmp_path: Path) -> None:
+    sam_bin = tmp_path / "AWS SAM CLI" / "bin"
+    sam_runtime = tmp_path / "AWS SAM CLI" / "runtime"
+    sam_module = sam_runtime / "Lib" / "site-packages" / "samcli"
+    node_root = tmp_path / "Node JS"
+    npm_cli = node_root / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    sam_module.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    sam_bin.mkdir(parents=True)
+    (sam_bin / "sam.cmd").write_text(
+        '"%~dp0/../runtime/python.exe" -m samcli %*\n', encoding="utf-8"
+    )
+    (sam_runtime / "python.exe").write_bytes(b"")
+    (node_root / "node.exe").write_bytes(b"")
+    (node_root / "npm.cmd").write_text("@echo off\n", encoding="utf-8")
+    npm_cli.write_text("// npm\n", encoding="utf-8")
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$result = Resolve-WindowsIdpCliBridge "
+        "-SamCommandSource $env:TEST_SAM_SOURCE "
+        "-NodeCommandSource $env:TEST_NODE_SOURCE "
+        "-NpmCommandSource $env:TEST_NPM_SOURCE; "
+        "$result | ConvertTo-Json -Compress"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_SAM_SOURCE": str(sam_bin / "sam.cmd"),
+            "TEST_NODE_SOURCE": str(node_root / "node.exe"),
+            "TEST_NPM_SOURCE": str(node_root / "npm.cmd"),
+        }
+    )
+
+    result = json.loads(run_powershell(script, environment=environment))
+
+    assert result["BridgeRequired"] is True
+    assert Path(result["SamPythonPath"]).resolve() == (sam_runtime / "python.exe").resolve()
+    assert Path(result["NodeExecutablePath"]) == node_root / "node.exe"
+    assert Path(result["NpmCliPath"]) == npm_cli
+    assert result["SamNativeExecutablePath"] is None
+    assert result["NpmNativeExecutablePath"] is None
+
+
+def test_windows_idp_cli_bridge_accepts_native_executables(tmp_path: Path) -> None:
+    paths = {name: tmp_path / name for name in ("sam.exe", "node.exe", "npm.exe")}
+    for path in paths.values():
+        path.write_bytes(b"")
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$result = Resolve-WindowsIdpCliBridge "
+        "-SamCommandSource $env:TEST_SAM_SOURCE "
+        "-NodeCommandSource $env:TEST_NODE_SOURCE "
+        "-NpmCommandSource $env:TEST_NPM_SOURCE; "
+        "$result | ConvertTo-Json -Compress"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_SAM_SOURCE": str(paths["sam.exe"]),
+            "TEST_NODE_SOURCE": str(paths["node.exe"]),
+            "TEST_NPM_SOURCE": str(paths["npm.exe"]),
+        }
+    )
+
+    result = json.loads(run_powershell(script, environment=environment))
+
+    assert result["BridgeRequired"] is False
+    assert Path(result["SamNativeExecutablePath"]) == paths["sam.exe"]
+    assert Path(result["NpmNativeExecutablePath"]) == paths["npm.exe"]
+    assert result["SamPythonPath"] is None
+    assert result["NodeExecutablePath"] is None
+    assert result["NpmCliPath"] is None
+
+
+@pytest.mark.parametrize(
+    ("sam_source", "message"),
+    [("relative-sam.cmd", "must be an absolute file"), ("bad.exe", "must be an absolute file")],
+)
+def test_windows_idp_cli_bridge_rejects_untrusted_sources(
+    tmp_path: Path, sam_source: str, message: str
+) -> None:
+    node = tmp_path / "node.exe"
+    npm = tmp_path / "npm.exe"
+    node.write_bytes(b"")
+    npm.write_bytes(b"")
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$message = ''; try { Resolve-WindowsIdpCliBridge "
+        "-SamCommandSource $env:TEST_SAM_SOURCE "
+        "-NodeCommandSource $env:TEST_NODE_SOURCE "
+        "-NpmCommandSource $env:TEST_NPM_SOURCE | Out-Null "
+        "} catch { $message = $_.Exception.Message }; [Console]::Out.Write($message)"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_SAM_SOURCE": sam_source,
+            "TEST_NODE_SOURCE": str(node),
+            "TEST_NPM_SOURCE": str(npm),
+        }
+    )
+
+    result = run_powershell(script, environment=environment)
+
+    assert message in result
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("wrapper", "does not match the reviewed official launcher layout"),
+        ("runtime", "has no bundled Python runtime"),
+        ("module", "has no bundled samcli module"),
+    ],
+)
+def test_windows_idp_cli_bridge_rejects_invalid_sam_layout(
+    tmp_path: Path, failure: str, message: str
+) -> None:
+    sam_bin = tmp_path / "SAM" / "bin"
+    sam_runtime = tmp_path / "SAM" / "runtime"
+    sam_bin.mkdir(parents=True)
+    wrapper = sam_bin / "sam.cmd"
+    wrapper.write_text(
+        "@echo off\n" if failure == "wrapper" else '"%~dp0/../runtime/python.exe" -m samcli %*\n',
+        encoding="utf-8",
+    )
+    if failure != "runtime":
+        sam_runtime.mkdir()
+        (sam_runtime / "python.exe").write_bytes(b"")
+    if failure not in {"runtime", "module"}:
+        (sam_runtime / "Lib" / "site-packages" / "samcli").mkdir(parents=True)
+    node = tmp_path / "node.exe"
+    npm = tmp_path / "npm.exe"
+    node.write_bytes(b"")
+    npm.write_bytes(b"")
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$message = ''; try { Resolve-WindowsIdpCliBridge "
+        "-SamCommandSource $env:TEST_SAM_SOURCE -NodeCommandSource $env:TEST_NODE_SOURCE "
+        "-NpmCommandSource $env:TEST_NPM_SOURCE | Out-Null } "
+        "catch { $message = $_.Exception.Message }; [Console]::Out.Write($message)"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_SAM_SOURCE": str(wrapper),
+            "TEST_NODE_SOURCE": str(node),
+            "TEST_NPM_SOURCE": str(npm),
+        }
+    )
+
+    assert message in run_powershell(script, environment=environment)
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("extension", "not a native executable or supported official wrapper"),
+        ("directory", "must share an installation directory"),
+        ("module", "has no npm CLI module"),
+    ],
+)
+def test_windows_idp_cli_bridge_rejects_invalid_npm_layout(
+    tmp_path: Path, failure: str, message: str
+) -> None:
+    sam = tmp_path / "sam.exe"
+    sam.write_bytes(b"")
+    node_root = tmp_path / "node"
+    npm_root = tmp_path / "other-node" if failure == "directory" else node_root
+    node_root.mkdir()
+    npm_root.mkdir(exist_ok=True)
+    node = node_root / "node.exe"
+    npm = npm_root / ("npm.bat" if failure == "extension" else "npm.cmd")
+    node.write_bytes(b"")
+    npm.write_text("@echo off\n", encoding="utf-8")
+    if failure != "module":
+        npm_cli = node_root / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        npm_cli.parent.mkdir(parents=True)
+        npm_cli.write_text("// npm\n", encoding="utf-8")
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$message = ''; try { Resolve-WindowsIdpCliBridge "
+        "-SamCommandSource $env:TEST_SAM_SOURCE -NodeCommandSource $env:TEST_NODE_SOURCE "
+        "-NpmCommandSource $env:TEST_NPM_SOURCE | Out-Null } "
+        "catch { $message = $_.Exception.Message }; [Console]::Out.Write($message)"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_SAM_SOURCE": str(sam),
+            "TEST_NODE_SOURCE": str(node),
+            "TEST_NPM_SOURCE": str(npm),
+        }
+    )
+
+    assert message in run_powershell(script, environment=environment)
+
+
+def test_command_source_resolver_fails_when_only_managed_shim_exists(tmp_path: Path) -> None:
+    managed = tmp_path / "managed" / "Scripts"
+    managed.mkdir(parents=True)
+    suffix = ".exe" if os.name == "nt" else ""
+    command = managed / f"idp-only-managed-test{suffix}"
+    command.write_bytes(b"" if os.name == "nt" else b"#!/bin/sh\nexit 0\n")
+    command.chmod(0o755)
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$message = ''; try { Resolve-CommandSourceOutsidePath "
+        "-Name 'idp-only-managed-test' -ExcludedDirectory $env:TEST_EXCLUDED | Out-Null } "
+        "catch { $message = $_.Exception.Message }; [Console]::Out.Write($message)"
+    )
+    environment = os.environ.copy()
+    environment["TEST_EXCLUDED"] = str(managed)
+    environment["PATH"] = os.pathsep.join([str(managed), environment["PATH"]])
+
+    result = run_powershell(script, environment=environment)
+
+    assert "was not found outside the managed IDP CLI environment" in result
 
 
 def test_idp_cli_toolchain_keeps_python_runtimes_split() -> None:
@@ -177,6 +471,14 @@ def test_idp_cli_toolchain_keeps_python_runtimes_split() -> None:
     assert '.local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag' in deploy
     assert "lib/idp_common_pkg')[all]" in deploy
     assert "Invoke-WithPrependedPath" in deploy
+    assert ".BridgeRequired" not in deploy
+    assert "$bridgeIdentity = ($bridgeSources" in deploy
+    assert "$cliEnvironment = @{ PYTHONUTF8 = '1' }" in deploy
+    assert "$cliEnvironment[$entry.Name] = [string]$entry.Value" in deploy
+    assert "IsNullOrWhiteSpace([string]$entry.Value)" not in deploy
+    assert deploy.index("Invoke-Checked -Command sam -Arguments @('--version')") < deploy.index(
+        "[IO.File]::WriteAllText($installMarker"
+    )
     assert "Python.Python.3.12" in bootstrap
     assert production.index("python-version: '3.12'") < production.index(
         "python-version: '3.13'"

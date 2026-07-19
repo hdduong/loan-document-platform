@@ -1076,7 +1076,7 @@ def validate_idp_python_toolchain_contract(
         "lib/idp_common_pkg')[all]",
         "'-m', 'pip', 'check'",
         'm.version(\"numpy\") == \"1.26.4\"',
-        "Invoke-WithPrependedPath -Path $venvExecutableDirectory -ScriptBlock",
+        "Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment",
     ):
         require(fragment in deploy_script, f"Pinned IDP Python gate lacks: {fragment}")
     require(
@@ -1099,6 +1099,84 @@ def validate_idp_python_toolchain_contract(
         _setup_python_versions(validation_workflow, "validate.yml") == ["3.13"],
         "Pull-request validation must remain on platform Python 3.13 only.",
     )
+
+
+def validate_idp_windows_bridge_contract(
+    deploy_script: str,
+    common_module: str,
+    bridge_project: str,
+    bridge_source: str,
+) -> None:
+    """Keep Windows child-tool relays native, scoped, reviewable, and cache-bound."""
+
+    for fragment in (
+        "Resolve-CommandSourceOutsidePath -Name sam",
+        "Resolve-CommandSourceOutsidePath -Name node",
+        "Resolve-CommandSourceOutsidePath -Name npm",
+        "$bridgeSources = @(",
+        "$bridgeIdentity = ($bridgeSources | ForEach-Object { Get-NormalizedTextSha256 -Path $_ })",
+        "$expectedInstallIdentity =",
+        "'--no-deps',",
+        "'--editable', $bridgePackageDirectory",
+        "$cliEnvironment = @{ PYTHONUTF8 = '1' }",
+        "IDP_SAM_NATIVE_EXECUTABLE",
+        "IDP_SAM_CLI_PYTHON",
+        "IDP_NPM_NATIVE_EXECUTABLE",
+        "IDP_NODE_EXECUTABLE",
+        "IDP_NPM_CLI_JS",
+        "$cliEnvironment[$entry.Name] = [string]$entry.Value",
+        "Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment",
+        "Invoke-Checked -Command sam -Arguments @('--version')",
+        "Invoke-Checked -Command npm -Arguments @('--version')",
+    ):
+        require(fragment in deploy_script, f"Windows IDP bridge deployment lacks: {fragment}")
+    require(
+        ".BridgeRequired" not in deploy_script,
+        "Every Windows topology must install and hash the reviewed native bridge.",
+    )
+    require(
+        "IsNullOrWhiteSpace([string]$entry.Value)" not in deploy_script,
+        "Windows bridge target variables must be explicitly cleared when inapplicable.",
+    )
+    require(
+        deploy_script.index("Invoke-Checked -Command sam -Arguments @('--version')")
+        < deploy_script.index("[IO.File]::WriteAllText($installMarker"),
+        "The Windows bridge must pass child-tool smoke tests before its cache marker is written.",
+    )
+
+    for fragment in (
+        "function Resolve-CommandSourceOutsidePath",
+        "-CommandType Application -All",
+        "function Resolve-WindowsIdpCliBridge",
+        "%~dp0/",
+        "../runtime/python.exe",
+        "Lib/site-packages/samcli",
+        "node_modules/npm/bin/npm-cli.js",
+        "must share an installation directory",
+        'Remove-Item -LiteralPath "Env:$name"',
+    ):
+        require(fragment in common_module, f"Windows IDP bridge resolver lacks: {fragment}")
+
+    for fragment in (
+        'requires = ["setuptools==80.9.0"]',
+        'requires-python = ">=3.12,<3.13"',
+        'sam = "idp_windows_cli_bridge:main"',
+        'npm = "idp_windows_cli_bridge:main"',
+    ):
+        require(fragment in bridge_project, f"Windows IDP bridge package lacks: {fragment}")
+
+    for prohibited in ("shell=True", "shell = True", "os.system", "cmd.exe", "cmd /c"):
+        require(prohibited not in bridge_source, f"Windows IDP bridge uses a shell path: {prohibited}")
+    for fragment in (
+        "not path.is_absolute()",
+        'if launcher_path.suffix.casefold() != ".exe"',
+        'candidates.append(Path(f"{launcher}.exe"))',
+        "if _targets_launcher(command[0], sys.argv[0])",
+        'subprocess.run(command, check=False, shell=False)',
+        'return [python, "-m", "samcli", *arguments]',
+        "return [node, npm_cli, *arguments]",
+    ):
+        require(fragment in bridge_source, f"Windows IDP bridge relay lacks: {fragment}")
 
 
 def validate_workflow_actions(value: Any, path: Path) -> None:
@@ -1394,6 +1472,16 @@ def validate_azure_control_plane() -> None:
         (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8"),
         (ROOT / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8"),
         (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8"),
+    )
+    validate_idp_windows_bridge_contract(
+        idp_deploy,
+        (ROOT / "scripts" / "common.psm1").read_text(encoding="utf-8"),
+        (ROOT / "scripts" / "idp_windows_cli_bridge" / "pyproject.toml").read_text(
+            encoding="utf-8"
+        ),
+        (ROOT / "scripts" / "idp_windows_cli_bridge" / "idp_windows_cli_bridge.py").read_text(
+            encoding="utf-8"
+        ),
     )
 
     aws_template = (ROOT / "infra" / "api" / "template.yaml").read_text(encoding="utf-8")

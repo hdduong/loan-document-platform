@@ -242,6 +242,16 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 16: Native Windows IDP Child-Tool Bridge
+
+**Purpose**: Let the pinned Python publisher launch Windows SAM/npm safely without a command shell or upstream patch.
+
+- [x] T078 [P] [US4] Add argument-boundary, exit-code, self-target, activated-venv, layout-validation, scoped-environment, cache-contract, and validator-mutation regressions in `tests/test_idp_windows_cli_bridge.py`, `tests/test_powershell_deployment_helpers.py`, and `tests/test_repository_validator.py`
+- [x] T079 [US4] Add the reviewed Python 3.12 native console-entry package and fail-closed Windows SAM/Node/npm resolver, bind its normalized digest to the IDP cache identity, and smoke both child tools before marking installation complete
+- [x] T080 [US4] Record the Windows launcher boundary, recovery behavior, and no-shell/no-vendor-patch guarantees in the active Spec Kit artifacts, README, quickstart, and deployment runbook
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

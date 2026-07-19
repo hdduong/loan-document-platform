@@ -114,6 +114,18 @@ environment with dependency and import checks. Production Actions installs
 is temporarily prepended for child SAM builds. The source tree and dependency
 pins remain unchanged.
 
+The Windows SAM MSI and Node distributions expose `sam.cmd` and `npm.cmd`, but
+the pinned IDP publisher launches child tools directly through Python without a
+command processor. Deployment therefore validates the official SAM bundled
+Python/module layout and the co-located Node/npm module layout, then installs a
+small repository-owned console-entry package into the Python 3.12 environment.
+Its native `sam.exe` and `npm.exe` launchers relay list-form arguments with
+`shell=False`, reject missing, relative, or recursive targets, and inherit only
+temporarily scoped target variables plus UTF-8 mode. The bridge source digests
+are part of the cache marker, tool discovery excludes that managed environment,
+and smoke tests must pass before the marker is written. No upstream IDP source,
+SAM installation, or Node installation is patched.
+
 ## Project Structure
 
 ### Documentation (this feature)

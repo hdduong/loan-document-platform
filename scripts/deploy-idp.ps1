@@ -32,11 +32,28 @@ if ($lock.deploymentMode -ne 'headless') { throw 'The committed IDP lock must sp
 if ([string]$lock.cliPythonVersion -cne '3.12') {
     throw 'The reviewed IDP 0.5.16 CLI dependency set requires Python 3.12.'
 }
+$pythonRuntimeTag = ([string]$lock.cliPythonVersion).Replace('.', '')
+$venvDirectory = Join-Path $root ".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"
+$venvExecutableDirectory = if ($IsWindows) {
+    Join-Path $venvDirectory 'Scripts'
+} else {
+    Join-Path $venvDirectory 'bin'
+}
 
 foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm') {
     Assert-Command -Name $command -InstallHint "Install '$command' before building the pinned IDP source."
 }
 $idpPython = Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)
+$windowsCliBridge = $null
+if ($IsWindows) {
+    $samCommandSource = Resolve-CommandSourceOutsidePath -Name sam -ExcludedDirectory $venvExecutableDirectory
+    $nodeCommandSource = Resolve-CommandSourceOutsidePath -Name node -ExcludedDirectory $venvExecutableDirectory
+    $npmCommandSource = Resolve-CommandSourceOutsidePath -Name npm -ExcludedDirectory $venvExecutableDirectory
+    $windowsCliBridge = Resolve-WindowsIdpCliBridge `
+        -SamCommandSource $samCommandSource `
+        -NodeCommandSource $nodeCommandSource `
+        -NpmCommandSource $npmCommandSource
+}
 Assert-AwsIdentity -Profile $config.awsProfile -Region $config.awsRegion -ExpectedAccountId $config.awsAccountId | Out-Null
 
 $bootstrap = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.bootstrapStackName
@@ -99,17 +116,36 @@ if ($sourceCommit -ne $lock.commit) { throw "Checked-out IDP commit '$sourceComm
 & git -C $vendorDirectory diff --quiet --exit-code
 if ($LASTEXITCODE -ne 0) { throw 'Pinned IDP source has tracked local modifications; refusing a production build.' }
 
-$pythonRuntimeTag = ([string]$lock.cliPythonVersion).Replace('.', '')
-$venvDirectory = Join-Path $root ".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"
 $pythonExecutable = if ($IsWindows) {
     Join-Path $venvDirectory 'Scripts/python.exe'
 } else {
     Join-Path $venvDirectory 'bin/python'
 }
+$bridgePackageDirectory = Join-Path $root 'scripts/idp_windows_cli_bridge'
+$bridgeIdentity = 'native'
+$bridgeExecutables = @()
+if ($IsWindows) {
+    $bridgeSources = @(
+        (Join-Path $bridgePackageDirectory 'pyproject.toml'),
+        (Join-Path $bridgePackageDirectory 'idp_windows_cli_bridge.py')
+    )
+    $bridgeIdentity = ($bridgeSources | ForEach-Object { Get-NormalizedTextSha256 -Path $_ }) -join ':'
+    $bridgeExecutables = @(
+        (Join-Path $venvDirectory 'Scripts/sam.exe'),
+        (Join-Path $venvDirectory 'Scripts/npm.exe')
+    )
+}
 $installMarker = Join-Path $venvDirectory ".installed-$($lock.commit)-py$pythonRuntimeTag"
+$expectedInstallIdentity = "$($lock.commit)|python=$($lock.cliPythonVersion)|bridge=$bridgeIdentity"
+$installedIdentity = if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
+    (Get-Content -Raw -LiteralPath $installMarker).Trim()
+} else {
+    ''
+}
 $installRequired = $ReinstallCli -or
-    -not (Test-Path -LiteralPath $installMarker -PathType Leaf) -or
-    -not (Test-Path -LiteralPath $pythonExecutable -PathType Leaf)
+    -not (Test-Path -LiteralPath $pythonExecutable -PathType Leaf) -or
+    $installedIdentity -cne $expectedInstallIdentity -or
+    @($bridgeExecutables | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0
 if ($installRequired) {
     if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
         [IO.File]::Delete($installMarker)
@@ -136,16 +172,43 @@ if ($installRequired) {
         '-e', (Join-Path $vendorDirectory 'lib/idp_cli_pkg'),
         'cfn-lint'
     ) -FailureMessage 'Failed to install the pinned IDP CLI and build dependencies.'
+    if ($IsWindows) {
+        Invoke-Checked -Command $pythonExecutable -Arguments @(
+            '-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps',
+            '--editable', $bridgePackageDirectory
+        ) -FailureMessage 'Failed to install the reviewed Windows IDP child-tool bridge.'
+    }
 }
 Invoke-Checked -Command $pythonExecutable -Arguments @('-m', 'pip', 'check') -FailureMessage 'Pinned IDP CLI dependencies are inconsistent.'
 $dependencySmoke = 'import importlib.metadata as m; import idp_common, idp_sdk, idp_cli; assert m.version("numpy") == "1.26.4"'
 Invoke-Checked -Command $pythonExecutable -Arguments @('-c', $dependencySmoke) -FailureMessage 'Pinned IDP CLI dependency smoke test failed.'
-if ($installRequired) {
-    [IO.File]::WriteAllText($installMarker, $lock.commit + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+foreach ($bridgeExecutable in $bridgeExecutables) {
+    if (-not (Test-Path -LiteralPath $bridgeExecutable -PathType Leaf)) {
+        throw "Reviewed Windows IDP child-tool bridge was not installed: $bridgeExecutable"
+    }
 }
 
-$venvExecutableDirectory = Split-Path -Parent $pythonExecutable
-Invoke-WithPrependedPath -Path $venvExecutableDirectory -ScriptBlock {
+$cliEnvironment = @{ PYTHONUTF8 = '1' }
+if ($null -ne $windowsCliBridge) {
+    foreach ($entry in @(
+        @{ Name = 'IDP_SAM_NATIVE_EXECUTABLE'; Value = $windowsCliBridge.SamNativeExecutablePath },
+        @{ Name = 'IDP_SAM_CLI_PYTHON'; Value = $windowsCliBridge.SamPythonPath },
+        @{ Name = 'IDP_NPM_NATIVE_EXECUTABLE'; Value = $windowsCliBridge.NpmNativeExecutablePath },
+        @{ Name = 'IDP_NODE_EXECUTABLE'; Value = $windowsCliBridge.NodeExecutablePath },
+        @{ Name = 'IDP_NPM_CLI_JS'; Value = $windowsCliBridge.NpmCliPath }
+    )) {
+        $cliEnvironment[$entry.Name] = [string]$entry.Value
+    }
+}
+Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment -ScriptBlock {
+    Invoke-Checked -Command sam -Arguments @('--version') -FailureMessage 'The native SAM CLI child-tool path is not executable.'
+    Invoke-Checked -Command npm -Arguments @('--version') -FailureMessage 'The native npm child-tool path is not executable.'
+}
+if ($installRequired) {
+    [IO.File]::WriteAllText($installMarker, $expectedInstallIdentity + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+}
+
+Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment -ScriptBlock {
     Invoke-Checked -Command docker -Arguments @('info') -FailureMessage 'Docker is required and must be running for a pinned source IDP build.'
 $cliPrefix = @('-m', 'idp_cli.cli')
 if ($env:GITHUB_ACTIONS -ne 'true') { $cliPrefix += @('--profile', $config.awsProfile) }
