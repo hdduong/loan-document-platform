@@ -295,6 +295,10 @@ Resources:
                 Effect: Allow
                 Action: budgets:*
                 Resource: !Sub 'arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/loan-document-${EnvironmentName}-monthly'
+              - Sid: ApplyAwsServerlessTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
         - PolicyName: PlatformIamProvisioning
           PolicyDocument:
             Version: '2012-10-17'
@@ -443,6 +447,10 @@ Resources:
                   - cloudformation:GetTemplateSummary
                   - cloudformation:ValidateTemplate
                 Resource: '*'
+              - Sid: ApplyAwsServerlessTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
         - PolicyName: PinnedIdpIamProvisioning
           PolicyDocument:
             Version: '2012-10-17'

@@ -78,6 +78,8 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 5. **Given** Azure CLI is installed through the Windows MSI `az.cmd` wrapper, **When** a provisioning script sends a Graph query URI or JSON body containing command-shell metacharacters, **Then** the script bypasses `cmd.exe`, preserves every argument exactly, and fails closed if the safe Azure CLI engine cannot be resolved.
 6. **Given** a new Entra application has no existing delegated scopes or application roles, **When** provisioning initializes its permissions, **Then** the empty collections are accepted and every required permission receives a stable generated identifier.
 7. **Given** custom Entra applications require unique delegated-scope and app-role values, **When** canonical permission `P` is provisioned, **Then** its scope is `P`, its role is `P.Role`, and the Azure API accepts only that exact role before normalizing it to `P` for private domain dispatch.
+8. **Given** a first-install AWS environment has no IDP or platform stack and AWS CLI prefixes a service error with its standard `aws: [ERROR]:` marker, **When** the explicit bootstrap pass allows a missing stack, **Then** only the exact `DescribeStacks` not-found response is accepted and every access, throttling, validation, warning, or multiline error still fails closed.
+9. **Given** the private platform and pinned IDP templates use the AWS Serverless transform, **When** CloudFormation assumes either split execution role, **Then** that role can create a change set only for the regional AWS-managed Serverless transform in addition to its existing stack-specific resource permissions.
 
 ### Edge Cases
 
@@ -122,6 +124,8 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **FR-025**: While the retained domain uses module-global AWS clients, each single-worker Azure API replica MUST serialize workload-session acquisition, client binding, and domain dispatch; its HTTP scale target MUST remain exactly `1` to minimize head-of-line waiting without treating that scaling signal as a hard admission cap, and horizontal scale MUST remain bounded by the configured maximum replicas.
 - **FR-026**: PowerShell provisioning MUST invoke Azure CLI without passing Graph query URIs, JSON bodies, or other untrusted metacharacters through the Windows command processor; Windows MSI installations MUST use the bundled Azure CLI Python engine directly, while non-`cmd` installations MUST preserve native argument boundaries.
 - **FR-027**: For canonical permission `P`, Entra provisioning MUST publish delegated scope `P` and collision-free application role `P.Role`; the Azure API MUST reject an unsuffixed or differently suffixed role and normalize only `P.Role` to `P` after validating the external token.
+- **FR-028**: Missing-stack handling MAY remove one exact AWS CLI `aws: [ERROR]: ` service-error prefix, including its single trailing ASCII space, before classification, but MUST otherwise require the complete anchored CloudFormation `DescribeStacks` `ValidationError` not-found message and MUST NOT treat other CLI or service failures as absence; AWS command failures MUST report only the service and operation, never parameter values.
+- **FR-029**: Each split CloudFormation execution role MUST allow `cloudformation:CreateChangeSet` on only the regional AWS-managed `Serverless-2016-10-31` transform ARN required to expand reviewed SAM templates; this permission MUST NOT broaden the GitHub deployment role or stack resource scope.
 
 ### Key Entities
 
@@ -149,6 +153,8 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **SC-010**: Production acceptance demonstrates successful backup restore, credential/trust revocation, certificate renewal, dependency-failure alarms, and a synthetic end-to-end upload/status/download journey.
 - **SC-011**: Automated PowerShell-helper tests prove that Azure CLI arguments containing `&`, `$`, and JSON punctuation remain single literal arguments and that Windows `az.cmd` resolution selects the bundled Python engine rather than executing the wrapper.
 - **SC-012**: Deterministic provisioning and JWT tests prove that no generated scope and app role share a value, raw `P.Role` authorizes canonical permission `P`, and raw unsuffixed role `P` is rejected.
+- **SC-013**: PowerShell-helper tests accept both prefixed and unprefixed exact CloudFormation stack-not-found messages while rejecting prefixed access errors, warning prefixes, multiline output, throttling, and unrelated validation failures.
+- **SC-014**: Repository validation proves that exactly the platform and IDP CloudFormation execution roles include the regional AWS Serverless transform permission and that no shared execution role is restored.
 
 ## Assumptions
 

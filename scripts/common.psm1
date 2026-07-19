@@ -217,6 +217,18 @@ function Invoke-AzureCli {
     return Invoke-AzureCliLaunch -Launch $launch -Arguments $Arguments
 }
 
+function Get-AwsCliFailureContext {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    if ($Arguments.Count -lt 2) { return 'unknown operation' }
+    $safeParts = @($Arguments[0], $Arguments[1])
+    if (@($safeParts | Where-Object { $_ -cnotmatch '^[a-z0-9][a-z0-9-]*$' }).Count -gt 0) {
+        return 'unknown operation'
+    }
+    return ($safeParts -join ' ')
+}
+
 function Invoke-Aws {
     [CmdletBinding()]
     param(
@@ -230,9 +242,23 @@ function Invoke-Aws {
         $allArguments = @('--profile', $Profile) + $allArguments
     }
     if ($CaptureJson) { $allArguments += @('--output', 'json') }
-    $output = & aws @allArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "AWS CLI failed: aws $($Arguments -join ' ')"
+    $output = @()
+    $exitCode = -1
+    $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    try {
+        if ($null -ne $nativePreference) {
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+        }
+        $output = @(& aws @allArguments 2>$null)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        if ($null -ne $nativePreference) {
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativePreference.Value -Scope Local
+        }
+    }
+    if ($exitCode -ne 0) {
+        $operation = Get-AwsCliFailureContext -Arguments $Arguments
+        throw "AWS CLI failed while running 'aws $operation'."
     }
     if ($CaptureJson) {
         return ($output | Out-String | ConvertFrom-Json -Depth 50)
@@ -265,6 +291,10 @@ function Test-AwsCloudFormationStackNotFound {
     )
 
     $normalized = $ErrorText.Trim()
+    $awsCliServiceErrorPrefix = 'aws: [ERROR]: '
+    if ($normalized.StartsWith($awsCliServiceErrorPrefix, [StringComparison]::Ordinal)) {
+        $normalized = $normalized.Substring($awsCliServiceErrorPrefix.Length)
+    }
     return [bool]($normalized -match '\AAn error occurred \(ValidationError\) when calling the DescribeStacks operation: Stack with id [^\r\n]+ does not exist\.?\z')
 }
 
@@ -309,8 +339,7 @@ function Get-AwsCloudFormationStackDescription {
             Write-Host "CloudFormation stack '$StackName' does not exist yet."
             return $null
         }
-        if ($text.Length -gt 2000) { $text = $text.Substring(0, 2000) + '...' }
-        throw "Cannot describe CloudFormation stack '$StackName' (AWS CLI exit $exitCode): $text"
+        throw "AWS CLI failed while running 'aws cloudformation describe-stacks'."
     }
 
     try {

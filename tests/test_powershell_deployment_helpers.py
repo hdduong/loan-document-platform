@@ -329,9 +329,10 @@ def test_entra_permission_namespace_preflight_rejects_reserved_or_duplicate_valu
         "arn:aws:cloudformation:us-west-2:123456789012:stack/loan-idp-prod/abc123",
     ],
 )
-def test_cloudformation_classifier_accepts_only_stack_not_found(stack_id: str) -> None:
+@pytest.mark.parametrize("prefix", ["", "aws: [ERROR]: "])
+def test_cloudformation_classifier_accepts_only_stack_not_found(stack_id: str, prefix: str) -> None:
     message = (
-        "An error occurred (ValidationError) when calling the DescribeStacks operation: "
+        f"{prefix}An error occurred (ValidationError) when calling the DescribeStacks operation: "
         f"Stack with id {stack_id} does not exist"
     )
 
@@ -358,11 +359,107 @@ def test_cloudformation_classifier_accepts_only_stack_not_found(stack_id: str) -
             "An error occurred (ValidationError) when calling the DescribeStacks operation: "
             "Stack with id loan-idp-prod does not exist"
         ),
+        (
+            "aws: [WARNING]: An error occurred (ValidationError) when calling the "
+            "DescribeStacks operation: Stack with id loan-idp-prod does not exist"
+        ),
+        (
+            "aws: [ERROR]: An error occurred (AccessDenied) when calling the "
+            "DescribeStacks operation: User is not authorized"
+        ),
+        (
+            "aws: [ERROR]:An error occurred (ValidationError) when calling the "
+            "DescribeStacks operation: Stack with id loan-idp-prod does not exist"
+        ),
+        (
+            "aws: [ERROR]:\tAn error occurred (ValidationError) when calling the "
+            "DescribeStacks operation: Stack with id loan-idp-prod does not exist"
+        ),
+        (
+            "aws: [ERROR]:\nAn error occurred (ValidationError) when calling the "
+            "DescribeStacks operation: Stack with id loan-idp-prod does not exist"
+        ),
+        (
+            "aws: [ERROR]: aws: [ERROR]: An error occurred (ValidationError) when calling the "
+            "DescribeStacks operation: Stack with id loan-idp-prod does not exist"
+        ),
+        (
+            "aws: [ERROR]: An error occurred (ValidationError) when calling the "
+            "DescribeStacks operation: Stack with id loan-idp-prod does not exist\nextra diagnostic"
+        ),
         "",
     ],
 )
 def test_cloudformation_classifier_fails_closed_for_other_errors(message: str) -> None:
     assert not classify_stack_lookup_error(message)
+
+
+def test_aws_cli_failure_context_omits_deployment_arguments() -> None:
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        "$tokens = $null; $errors = $null; "
+        f"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{module_path}', "
+        "[ref]$tokens, [ref]$errors); "
+        "$definition = $ast.Find({ param($node) "
+        "$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+        "$node.Name -eq 'Get-AwsCliFailureContext' }, $true); "
+        "Invoke-Expression $definition.Extent.Text; "
+        "$context = Get-AwsCliFailureContext -Arguments "
+        "@('cloudformation', 'deploy', '--parameter-overrides', "
+        "'Tenant=secret-tenant', 'Email=secret@example.invalid'); "
+        "$invalid = Get-AwsCliFailureContext -Arguments @('--profile', 'secretname'); "
+        "$result = [pscustomobject]@{ Context = $context; Invalid = $invalid }; "
+        "[Console]::Out.Write(($result | ConvertTo-Json -Compress))"
+    )
+
+    result = json.loads(run_powershell(script, environment=os.environ.copy()))
+    source = COMMON_MODULE.read_text(encoding="utf-8")
+
+    assert result == {"Context": "cloudformation deploy", "Invalid": "unknown operation"}
+    assert "secret" not in json.dumps(result)
+    assert '$($Arguments -join' not in source
+
+
+def test_aws_cli_failures_do_not_emit_arguments_or_native_stderr(tmp_path: Path) -> None:
+    if os.name == "nt":
+        fake_aws = tmp_path / "aws.cmd"
+        fake_aws.write_text("@echo off\necho %* 1>&2\nexit /b 9\n", encoding="utf-8")
+    else:
+        fake_aws = tmp_path / "aws"
+        fake_aws.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >&2\nexit 9\n", encoding="utf-8")
+        fake_aws.chmod(0o755)
+
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$secret = 'Tenant=do-not-emit-this-value'; "
+        "$messages = @(); "
+        "try { Invoke-Aws -Profile 'test' -Region 'us-west-2' -Arguments "
+        "@('cloudformation', 'deploy', '--parameter-overrides', $secret) | Out-Null } "
+        "catch { $messages += $_.Exception.Message }; "
+        "try { Get-AwsCloudFormationStackDescription -Profile 'test' -Region 'us-west-2' "
+        "-StackName 'do-not-emit-this-stack' | Out-Null } "
+        "catch { $messages += $_.Exception.Message }; "
+        "[Console]::Out.Write(($messages | ConvertTo-Json -Compress))"
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = str(tmp_path) + os.pathsep + environment["PATH"]
+
+    completed = subprocess.run(
+        ["pwsh", "-NoLogo", "-NoProfile", "-Command", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    all_streams = completed.stdout + completed.stderr
+
+    assert json.loads(completed.stdout) == [
+        "AWS CLI failed while running 'aws cloudformation deploy'.",
+        "AWS CLI failed while running 'aws cloudformation describe-stacks'.",
+    ]
+    assert "do-not-emit" not in all_streams
+    assert "--parameter-overrides" not in all_streams
 
 
 def test_stateful_stack_policy_requires_default_allow_and_all_protected_types() -> None:

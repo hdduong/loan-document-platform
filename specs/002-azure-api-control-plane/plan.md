@@ -92,6 +92,10 @@ Clean-tenant Entra provisioning treats absent delegated-scope and application-ro
 
 Custom Entra applications enforce one value namespace across delegated scopes and application roles. The external claim contract therefore keeps canonical scope `P` while publishing role `P.Role`. A provisioning preflight rejects duplicate canonical values and reserves the `.Role` suffix so future catalog additions cannot reintroduce a cross-collection collision. The Azure JWT boundary accepts only the exact suffix, normalizes authorized roles back to canonical `P`, and passes only canonical permissions into the retained private domain seam. This preserves the public OAuth scope names and the existing domain contract without weakening role enforcement.
 
+AWS first-install stack discovery remains fail-closed across AWS CLI output versions. The classifier removes at most the exact standard `aws: [ERROR]: ` service-error prefix, including one literal trailing space, and then matches the full anchored CloudFormation `DescribeStacks` not-found response. It does not accept missing/tab/newline delimiters, warning or duplicate prefixes, multiple lines, access failures, throttling, or unrelated validation errors, so `-AllowMissingIdp` cannot conceal a credential or control-plane failure. Shared AWS failure context retains only the validated service and operation tokens; deployment parameters never enter the thrown error.
+
+The separate platform and IDP CloudFormation execution roles each receive one additional transform-only statement: `cloudformation:CreateChangeSet` on the regional AWS-owned `Serverless-2016-10-31` transform ARN. CloudFormation needs this during SAM expansion after it assumes the execution role. The GitHub deployment role remains limited to reviewed stack/change-set names, and neither execution role gains general CloudFormation control-plane access from this statement.
+
 ## Project Structure
 
 ### Documentation (this feature)

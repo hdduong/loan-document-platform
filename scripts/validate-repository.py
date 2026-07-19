@@ -58,6 +58,303 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+class CloudFormationSafeLoader(yaml.SafeLoader):
+    """Load CloudFormation YAML tags without constructing executable objects."""
+
+
+class CloudFormationTaggedValue:
+    def __init__(self, tag: str, value: Any) -> None:
+        self.tag = tag
+        self.value = value
+
+
+def _construct_cloudformation_value(
+    loader: CloudFormationSafeLoader, tag_suffix: str, node: yaml.Node
+) -> Any:
+    if isinstance(node, yaml.ScalarNode):
+        value = loader.construct_scalar(node)
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node)
+    elif isinstance(node, yaml.MappingNode):
+        value = loader.construct_mapping(node)
+    else:
+        raise ValueError(f"Unsupported CloudFormation YAML node: {type(node).__name__}")
+    return CloudFormationTaggedValue(tag_suffix, value)
+
+
+CloudFormationSafeLoader.add_multi_constructor("!", _construct_cloudformation_value)
+
+
+def _count_nested_scalar(value: Any, expected: str) -> int:
+    if isinstance(value, CloudFormationTaggedValue):
+        return _count_nested_scalar(value.value, expected)
+    if value == expected:
+        return 1
+    if isinstance(value, dict):
+        return sum(
+            _count_nested_scalar(key, expected) + _count_nested_scalar(child, expected)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return sum(_count_nested_scalar(child, expected) for child in value)
+    return 0
+
+
+def _inline_role_statements(role: dict[str, Any]) -> list[dict[str, Any]]:
+    properties = role.get("Properties")
+    policies = properties.get("Policies") if isinstance(properties, dict) else None
+    statements: list[dict[str, Any]] = []
+    if not isinstance(policies, list):
+        return statements
+    for policy in policies:
+        if not isinstance(policy, dict):
+            continue
+        policy_document = policy.get("PolicyDocument")
+        raw_statements = policy_document.get("Statement") if isinstance(policy_document, dict) else None
+        if isinstance(raw_statements, dict):
+            raw_statements = [raw_statements]
+        if isinstance(raw_statements, list):
+            statements.extend(item for item in raw_statements if isinstance(item, dict))
+    return statements
+
+
+def _nested_iam_statements(value: Any) -> list[dict[str, Any]]:
+    statements: list[dict[str, Any]] = []
+    if isinstance(value, CloudFormationTaggedValue):
+        statements.extend(_nested_iam_statements(value.value))
+    elif isinstance(value, dict):
+        has_action_scope = "Action" in value or "NotAction" in value
+        has_resource_scope = "Resource" in value or "NotResource" in value
+        if "Effect" in value and has_action_scope and has_resource_scope:
+            statements.append(value)
+        for child in value.values():
+            statements.extend(_nested_iam_statements(child))
+    elif isinstance(value, list):
+        for child in value:
+            statements.extend(_nested_iam_statements(child))
+    return statements
+
+
+def _cloudformation_scalar(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if (
+        isinstance(value, CloudFormationTaggedValue)
+        and value.tag == "Sub"
+        and isinstance(value.value, str)
+    ):
+        return value.value
+    return None
+
+
+def _iam_scope_patterns(
+    raw_values: Any, *, allow_substitutions: bool
+) -> list[str] | None:
+    values = raw_values if isinstance(raw_values, list) else [raw_values]
+    if not values:
+        return None
+    patterns: list[str] = []
+    for value in values:
+        scalar = _cloudformation_scalar(value)
+        if scalar is None:
+            return None
+        if isinstance(value, CloudFormationTaggedValue):
+            if not allow_substitutions:
+                return None
+            scalar = re.sub(r"\$\{[^}]+\}", "*", scalar)
+        patterns.append(scalar)
+    return patterns
+
+
+def _iam_glob_matches(value: str, pattern: str) -> bool:
+    expression = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+    return re.fullmatch(expression, value) is not None
+
+
+def _resource_pattern_may_cover_transform(pattern: str, symbolic_transform_arn: str) -> bool:
+    if _iam_glob_matches(symbolic_transform_arn, pattern):
+        return True
+    parts = pattern.split(":", 5)
+    if len(parts) != 6:
+        return False
+    arn_prefix, partition, service, region, owner, resource = parts
+    variable_component = re.compile(r"^[A-Za-z0-9*?${}._-]+$")
+    return (
+        _iam_glob_matches("arn", arn_prefix)
+        and variable_component.fullmatch(partition) is not None
+        and _iam_glob_matches("cloudformation", service)
+        and variable_component.fullmatch(region) is not None
+        and _iam_glob_matches("aws", owner)
+        and _iam_glob_matches("transform/Serverless-2016-10-31", resource)
+    )
+
+
+def _resource_pattern_proves_transform_exclusion(pattern: str) -> bool:
+    transform_name = "transform/Serverless-2016-10-31"
+    representative_targets = (
+        f"arn:aws:cloudformation:us-west-2:aws:{transform_name}",
+        f"arn:aws:cloudformation:eu-central-1:aws:{transform_name}",
+        f"arn:aws-us-gov:cloudformation:us-gov-west-1:aws:{transform_name}",
+        f"arn:aws-cn:cloudformation:cn-north-1:aws:{transform_name}",
+        f"arn:aws-iso:cloudformation:us-iso-east-1:aws:{transform_name}",
+    )
+    return all(_iam_glob_matches(target, pattern) for target in representative_targets)
+
+
+def _statement_scope_covers_cloudformation_transform(
+    statement: dict[str, Any], transform_arn: str
+) -> bool | None:
+    target_action = "cloudformation:createchangeset"
+    uses_action = "Action" in statement
+    raw_actions = statement.get("Action", statement.get("NotAction"))
+    action_patterns = _iam_scope_patterns(raw_actions, allow_substitutions=uses_action)
+    if action_patterns is None:
+        return None
+    action_pattern_matches = any(
+        _iam_glob_matches(target_action, pattern.lower()) for pattern in action_patterns
+    )
+    action_matches = action_pattern_matches if uses_action else not action_pattern_matches
+    if not action_matches:
+        return False
+
+    uses_resource = "Resource" in statement
+    raw_resources = statement.get("Resource", statement.get("NotResource"))
+    resource_patterns = _iam_scope_patterns(raw_resources, allow_substitutions=uses_resource)
+    if resource_patterns is None:
+        return None
+    if uses_resource:
+        resource_pattern_matches = any(
+            _resource_pattern_may_cover_transform(pattern, transform_arn)
+            for pattern in resource_patterns
+        )
+        resource_matches = resource_pattern_matches
+    else:
+        provably_excludes_transform = any(
+            _resource_pattern_proves_transform_exclusion(pattern)
+            for pattern in resource_patterns
+        )
+        resource_matches = not provably_excludes_transform
+    return action_matches and resource_matches
+
+
+def validate_serverless_transform_execution_roles(template_text: str) -> None:
+    """Require the exact SAM transform permission on both split execution roles."""
+
+    try:
+        template = yaml.load(template_text, Loader=CloudFormationSafeLoader)
+    except yaml.YAMLError as exc:
+        raise ValueError("AWS bootstrap template must be valid CloudFormation YAML.") from exc
+
+    require(isinstance(template, dict), "AWS bootstrap template must be a mapping.")
+    resources = template.get("Resources")
+    require(isinstance(resources, dict), "AWS bootstrap template must declare Resources.")
+
+    transform_arn = (
+        "arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31"
+    )
+    expected_sid = "ApplyAwsServerlessTransform"
+    expected_role_names = (
+        "PlatformCloudFormationExecutionRole",
+        "IdpCloudFormationExecutionRole",
+    )
+
+    prohibited_long_lived_principals = {
+        name
+        for name, resource in resources.items()
+        if isinstance(resource, dict)
+        and resource.get("Type") in {"AWS::IAM::User", "AWS::IAM::Group", "AWS::IAM::AccessKey"}
+    }
+    require(
+        not prohibited_long_lived_principals,
+        "AWS Serverless transform validation forbids IAM users, groups, and access keys in the OIDC bootstrap.",
+    )
+    for role_name, role in resources.items():
+        if not isinstance(role, dict) or role.get("Type") != "AWS::IAM::Role":
+            continue
+        properties = role.get("Properties")
+        managed_policy_arns = (
+            properties.get("ManagedPolicyArns") if isinstance(properties, dict) else None
+        )
+        require(
+            not managed_policy_arns,
+            f"{role_name} must not attach an external managed policy that can bypass "
+            "AWS Serverless transform validation.",
+        )
+
+    require(
+        _count_nested_scalar(template, transform_arn) == len(expected_role_names),
+        "Only the two split CloudFormation execution roles may reference the AWS Serverless transform.",
+    )
+    expected_statements: list[dict[str, Any]] = []
+    for role_name in expected_role_names:
+        role = resources.get(role_name)
+        require(
+            isinstance(role, dict) and role.get("Type") == "AWS::IAM::Role",
+            f"{role_name} must remain an AWS::IAM::Role.",
+        )
+        statements = _inline_role_statements(role)
+        properties = role.get("Properties")
+        require(
+            isinstance(properties, dict) and not properties.get("PermissionsBoundary"),
+            f"{role_name} must not use a permissions boundary that can block the AWS Serverless transform.",
+        )
+        candidates = [
+            statement
+            for statement in statements
+            if statement.get("Sid") == expected_sid
+            or _cloudformation_scalar(statement.get("Resource")) == transform_arn
+        ]
+        require(
+            len(candidates) == 1,
+            f"{role_name} must contain exactly one dedicated AWS Serverless transform statement.",
+        )
+        statement = candidates[0]
+        require(
+            set(statement) == {"Sid", "Effect", "Action", "Resource"}
+            and statement.get("Sid") == expected_sid
+            and statement.get("Effect") == "Allow"
+            and statement.get("Action") == "cloudformation:CreateChangeSet"
+            and _cloudformation_scalar(statement.get("Resource")) == transform_arn,
+            f"{role_name} AWS Serverless transform statement must grant only "
+            "cloudformation:CreateChangeSet on the exact transform ARN.",
+        )
+        expected_statements.append(statement)
+
+    iam_statements = _nested_iam_statements(template)
+    require(
+        all(statement.get("Effect") in ("Allow", "Deny") for statement in iam_statements),
+        "AWS Serverless transform validation requires a literal IAM Allow or Deny effect.",
+    )
+    evaluated_access = [
+        (statement, _statement_scope_covers_cloudformation_transform(statement, transform_arn))
+        for statement in iam_statements
+    ]
+    require(
+        all(access is not None for _, access in evaluated_access),
+        "AWS Serverless transform validation cannot accept an unresolved IAM action or resource scope.",
+    )
+    transform_access = [
+        statement
+        for statement, access in evaluated_access
+        if statement.get("Effect") == "Allow" and access
+    ]
+    transform_denials = [
+        statement
+        for statement, access in evaluated_access
+        if statement.get("Effect") == "Deny" and access
+    ]
+    require(
+        not transform_denials,
+        "AWS Serverless transform access must not be blocked by an explicit IAM Deny.",
+    )
+    require(
+        len(transform_access) == len(expected_statements)
+        and {id(statement) for statement in transform_access}
+        == {id(statement) for statement in expected_statements},
+        "AWS Serverless transform access must remain exclusive to the two exact execution-role statements.",
+    )
+
+
 def validate_workflow_actions(value: Any, path: Path) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -393,8 +690,10 @@ def validate_azure_control_plane() -> None:
         "DenyIdpBoundaryRemoval",
         "stack/${PlatformStackName}/*",
         "stack/${IdpStackName}/*",
+        "arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31",
     ):
         require(required_fragment in bootstrap_template, f"AWS deployment least privilege lacks: {required_fragment}")
+    validate_serverless_transform_execution_roles(bootstrap_template)
     require(
         "\n  CloudFormationExecutionRole:\n" not in bootstrap_template,
         "The obsolete shared CloudFormation execution role must not be restored.",

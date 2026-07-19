@@ -5,6 +5,69 @@ from pathlib import Path
 
 import pytest
 
+TRANSFORM_ARN = (
+    "arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:"
+    "transform/Serverless-2016-10-31"
+)
+
+
+def bootstrap_transform_template(
+    *,
+    platform_effect: str = "Allow",
+    platform_action: str = "cloudformation:CreateChangeSet",
+    platform_resource: str = TRANSFORM_ARN,
+    include_idp_statement: bool = True,
+    duplicate_platform_statement: bool = False,
+    deny_platform_transform: bool = False,
+) -> str:
+    platform_duplicate = (
+        f"""
+              - Sid: ApplyAwsServerlessTransformAgain
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub '{TRANSFORM_ARN}'"""
+        if duplicate_platform_statement
+        else ""
+    )
+    idp_statement = (
+        f"""
+              - Sid: ApplyAwsServerlessTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub '{TRANSFORM_ARN}'"""
+        if include_idp_statement
+        else ""
+    )
+    platform_deny = (
+        """
+              - Sid: BlockAwsServerlessTransform
+                Effect: Deny
+                Action: cloudformation:CreateChangeSet
+                Resource: '*'"""
+        if deny_platform_transform
+        else ""
+    )
+    return f"""Resources:
+  PlatformCloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: PlatformCloudFormation
+          PolicyDocument:
+            Statement:
+              - Sid: ApplyAwsServerlessTransform
+                Effect: {platform_effect}
+                Action: {platform_action}
+                Resource: !Sub '{platform_resource}'{platform_duplicate}{platform_deny}
+  IdpCloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: IdpCloudFormation
+          PolicyDocument:
+            Statement:{idp_statement}
+"""
+
 
 def load_validator():
     path = Path(__file__).resolve().parents[1] / "scripts" / "validate-repository.py"
@@ -35,6 +98,231 @@ def test_workflow_trigger_names_rejects_invalid_values(value: object) -> None:
 
     with pytest.raises(ValueError):
         validator.workflow_trigger_names(value, Path("workflow.yml"))
+
+
+def test_serverless_transform_permission_is_scoped_to_each_execution_role() -> None:
+    validator = load_validator()
+
+    validator.validate_serverless_transform_execution_roles(bootstrap_transform_template())
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        bootstrap_transform_template(platform_effect="Deny"),
+        bootstrap_transform_template(platform_action="cloudformation:*"),
+        bootstrap_transform_template(platform_resource="*"),
+        bootstrap_transform_template(deny_platform_transform=True),
+        bootstrap_transform_template().replace(
+            "Properties:\n      Policies:",
+            "Properties:\n"
+            "      PermissionsBoundary: arn:aws:iam::aws:policy/ReadOnlyAccess\n"
+            "      Policies:",
+            1,
+        ),
+        bootstrap_transform_template().replace(
+            f"Resource: !Sub '{TRANSFORM_ARN}'",
+            f"Resource: !Sub '{TRANSFORM_ARN}'\n"
+            "                Condition:\n"
+            "                  Bool:\n"
+            "                    aws:SecureTransport: true",
+            1,
+        ),
+        bootstrap_transform_template().replace(
+            f"Resource: !Sub '{TRANSFORM_ARN}'",
+            f"Resource:\n                  - !Sub '{TRANSFORM_ARN}'",
+            1,
+        ),
+        bootstrap_transform_template(include_idp_statement=False),
+        bootstrap_transform_template(
+            include_idp_statement=False,
+            duplicate_platform_statement=True,
+        ),
+        bootstrap_transform_template()
+        + f"""  UnexpectedTransformPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub '{TRANSFORM_ARN}'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedWildcardPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:*
+            Resource: '*'
+""",
+        bootstrap_transform_template()
+        + """  GitHubDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedConcreteTransformRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: UnexpectedTransformAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: arn:aws:cloudformation:us-west-2:aws:transform/*
+""",
+        bootstrap_transform_template()
+        + """  DeploymentUser:
+    Type: AWS::IAM::User
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedNotActionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            NotAction: s3:*
+            Resource: '*'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedNotResourcePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            NotResource: arn:aws:s3:::unrelated
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedConcreteNotResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: UnexpectedInverseScope
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                NotResource: arn:aws-cn:cloudformation:cn-north-1:aws:transform/*
+""",
+        bootstrap_transform_template()
+        + f"""  UnexpectedLiteralPseudoParameterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: UnexpectedLiteralScope
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                NotResource: {TRANSFORM_ARN}
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedComposedActionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              Fn::Join: ['', [cloudformation, ':*']]
+            Resource: '*'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedComposedResourcePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            Resource:
+              Fn::Join: ['', ['*']]
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedConditionalEffectPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: !If [UseBroadPolicy, Allow, Deny]
+            Action: cloudformation:CreateChangeSet
+            Resource: '*'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedSubActionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: !Sub 'cloudformation:${UnresolvedAction}'
+            Resource: '*'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedSubResourcePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            Resource: !Sub '${UnresolvedArn}'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedConditionalStatementPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement: !If
+          - UseBroadPolicy
+          - Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            Resource: '*'
+          - Effect: Deny
+            Action: cloudformation:CreateChangeSet
+            Resource: '*'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedSubNotActionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            NotAction: !Sub '${UnresolvedAction}'
+            Resource: '*'
+""",
+        bootstrap_transform_template()
+        + """  UnexpectedSubNotResourcePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:CreateChangeSet
+            NotResource: !Sub '${UnresolvedArn}'
+""",
+        bootstrap_transform_template(include_idp_statement=False)
+        + f"# Resource: !Sub '{TRANSFORM_ARN}'\n",
+    ],
+)
+def test_serverless_transform_permission_rejects_policy_mutations(template: str) -> None:
+    validator = load_validator()
+
+    with pytest.raises(ValueError, match="AWS Serverless transform"):
+        validator.validate_serverless_transform_execution_roles(template)
 
 
 def test_markdown_links_must_resolve_inside_repository(tmp_path: Path, monkeypatch) -> None:
@@ -122,11 +410,11 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "AWS::ApiGatewayV2::Api"
         ),
         "infra/bootstrap/template.yaml": (
-            "PlatformCloudFormationExecutionRole:\nIdpCloudFormationExecutionRole:\n"
-            "PlatformRolePermissionsBoundary:\nIdpRolePermissionsBoundary:\n"
-            "iam:PermissionsBoundary:\niam:PolicyARN:\niam:PassedToService:\n"
-            "DenyPlatformBoundaryRemoval\nDenyIdpBoundaryRemoval\n"
-            "stack/${PlatformStackName}/*\nstack/${IdpStackName}/*\n"
+            bootstrap_transform_template()
+            + "# PlatformRolePermissionsBoundary:\n# IdpRolePermissionsBoundary:\n"
+            "# iam:PermissionsBoundary:\n# iam:PolicyARN:\n# iam:PassedToService:\n"
+            "# DenyPlatformBoundaryRemoval\n# DenyIdpBoundaryRemoval\n"
+            "# stack/${PlatformStackName}/*\n# stack/${IdpStackName}/*\n"
         ),
         "infra/stack-policies/protect-stateful-resources.json": (
             '{"Statement":[{"Effect":"Deny","Action":["Update:Delete","Update:Replace"],'

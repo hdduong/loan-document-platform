@@ -179,6 +179,16 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 10: AWS Deployment Compatibility
+
+**Purpose**: Preserve fail-closed first-install stack discovery with current AWS CLI service-error formatting and allow both split execution roles to expand their reviewed SAM templates.
+
+- [x] T057 [P] [US4] Add prefixed positive and strict negative CloudFormation not-found classifier regressions in `tests/test_powershell_deployment_helpers.py`
+- [x] T058 [US4] Normalize only the exact AWS CLI service-error prefix before anchored missing-stack classification and sanitize shared AWS failure context in `scripts/common.psm1`
+- [x] T059 [US4] Grant both split CloudFormation execution roles access only to the regional AWS-managed Serverless transform in `infra/bootstrap/template.yaml`, enforce the exact two-role invariant in `scripts/validate-repository.py`, and add mutation coverage in `tests/test_repository_validator.py`
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
