@@ -23,6 +23,12 @@ def platform_api_handler_template(
     AllowedPattern: '[a-z0-9-]+'
     MaxLength: 13
 Resources:
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Tags:
+        - Key: KeyPurpose
+          Value: document-data
   SourceBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -76,6 +82,22 @@ def bootstrap_transform_template(
     AllowedPattern: '[a-z0-9-]+'
     MaxLength: 13
 Resources:
+  ArtifactKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Tags:
+        - Key: KeyPurpose
+          Value: deployment-artifacts
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'loan-document-${{EnvironmentName}}-ci-artifacts-${{AWS::AccountId}}-${{AWS::Region}}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt ArtifactKey.Arn
   PlatformCloudFormationExecutionRole:
     Type: AWS::IAM::Role
     Metadata:
@@ -98,6 +120,36 @@ Resources:
                   - !Sub 'arn:${{AWS::Partition}}:dynamodb:${{AWS::Region}}:${{AWS::AccountId}}:table/loan-document-${{EnvironmentName}}-registry/*'
                   - !Sub 'arn:${{AWS::Partition}}:s3:::loan-document-${{EnvironmentName}}-source-${{AWS::AccountId}}-${{AWS::Region}}'
                   - !Sub 'arn:${{AWS::Partition}}:s3:::loan-document-${{EnvironmentName}}-source-${{AWS::AccountId}}-${{AWS::Region}}/*'
+              - Sid: ReadPlatformDeploymentArtifacts
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${{ArtifactBucket.Arn}}/platform/${{EnvironmentName}}/*'
+              - Sid: DecryptPlatformDeploymentArtifacts
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt ArtifactKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 's3.${{AWS::Region}}.${{AWS::URLSuffix}}'
+                    kms:EncryptionContext:aws:s3:arn: !GetAtt ArtifactBucket.Arn
+              - Sid: CreateTaggedDataKey
+                Effect: Allow
+                Action: kms:CreateKey
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: loan-document-platform
+                    aws:RequestTag/Environment: !Ref EnvironmentName
+                    aws:RequestTag/KeyPurpose: document-data
+              - Sid: ManageTaggedDataKeys
+                Effect: Allow
+                Action: kms:*
+                Resource: !Sub 'arn:${{AWS::Partition}}:kms:${{AWS::Region}}:${{AWS::AccountId}}:key/*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: loan-document-platform
+                    aws:ResourceTag/Environment: !Ref EnvironmentName
+                    aws:ResourceTag/KeyPurpose: document-data
               - Sid: PlatformBackupAndMalwarePlan
                 Effect: Allow
                 Action:
@@ -183,6 +235,43 @@ def test_platform_cloudformation_handler_contract_is_exact() -> None:
     )
 
 
+def test_platform_packaging_contract_is_exact() -> None:
+    validator = load_validator()
+    script = """$packageArguments = @(
+    '--s3-bucket', [string]$bootstrap.ArtifactBucketName,
+    '--s3-prefix', "platform/$($config.environment)",
+    '--kms-key-id', [string]$bootstrap.ArtifactKeyArn
+)
+"""
+
+    validator.validate_platform_packaging_contract(script)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        ("ArtifactBucketName", "SourceBucketName"),
+        ("platform/$($config.environment)", "platform/shared"),
+        ("ArtifactKeyArn", "DataKeyArn"),
+    ],
+)
+def test_platform_packaging_contract_rejects_coordinate_drift(
+    mutation: tuple[str, str],
+) -> None:
+    validator = load_validator()
+    script = """$packageArguments = @(
+    '--s3-bucket', [string]$bootstrap.ArtifactBucketName,
+    '--s3-prefix', "platform/$($config.environment)",
+    '--kms-key-id', [string]$bootstrap.ArtifactKeyArn
+)
+"""
+
+    with pytest.raises(ValueError, match="artifact bucket"):
+        validator.validate_platform_packaging_contract(
+            script.replace(mutation[0], mutation[1], 1)
+        )
+
+
 @pytest.mark.parametrize(
     ("api_template", "bootstrap_template"),
     [
@@ -207,8 +296,42 @@ def test_platform_cloudformation_handler_contract_is_exact() -> None:
             bootstrap_transform_template(),
         ),
         (
+            platform_api_handler_template().replace(
+                "Value: document-data", "Value: deployment-artifacts", 1
+            ),
+            bootstrap_transform_template(),
+        ),
+        (
             platform_api_handler_template(),
             bootstrap_transform_template().replace("MaxLength: 13", "MaxLength: 64", 1),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Value: deployment-artifacts", "Value: document-data", 1
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "-ci-artifacts-${AWS::AccountId}-${AWS::Region}",
+                "-other-${AWS::AccountId}-${AWS::Region}",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "BucketKeyEnabled: true", "BucketKeyEnabled: false", 1
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "KMSMasterKeyID: !GetAtt ArtifactKey.Arn",
+                "KMSMasterKeyID: !GetAtt DataKey.Arn",
+                1,
+            ),
         ),
         (
             platform_api_handler_template(),
@@ -252,6 +375,96 @@ def test_platform_cloudformation_handler_contract_is_exact() -> None:
                 "                  - !Sub 'arn:${AWS::Partition}:dynamodb:",
                 "                  - '*'\n"
                 "                  - !Sub 'arn:${AWS::Partition}:dynamodb:",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "${ArtifactBucket.Arn}/platform/${EnvironmentName}/*",
+                "${ArtifactBucket.Arn}/platform/*",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Action: s3:GetObject",
+                "Action:\n"
+                "                  - s3:GetObject\n"
+                "                  - s3:GetObjectVersion",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "              - Sid: DecryptPlatformDeploymentArtifacts",
+                "              - Sid: BlockArtifactRead\n"
+                "                Effect: Deny\n"
+                "                Action: s3:GetObject\n"
+                "                Resource: '*'\n"
+                "              - Sid: DecryptPlatformDeploymentArtifacts",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Resource: !GetAtt ArtifactKey.Arn",
+                "Resource: '*'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "kms:EncryptionContext:aws:s3:arn: !GetAtt ArtifactBucket.Arn",
+                "kms:EncryptionContext:aws:s3:arn: '*'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "kms:ViaService: !Sub 's3.${AWS::Region}.${AWS::URLSuffix}'",
+                "kms:ViaService: '*'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Action: kms:Decrypt\n                Resource: !GetAtt ArtifactKey.Arn",
+                "Action: kms:*\n                Resource: !GetAtt ArtifactKey.Arn",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "                    aws:RequestTag/KeyPurpose: document-data\n",
+                "",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "aws:ResourceTag/KeyPurpose: document-data",
+                "aws:ResourceTag/KeyPurpose: deployment-artifacts",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "              - Sid: PlatformBackupAndMalwarePlan",
+                "              - Sid: BroadKmsDecryptBypass\n"
+                "                Effect: Allow\n"
+                "                Action: kms:Decrypt\n"
+                "                Resource: '*'\n"
+                "              - Sid: PlatformBackupAndMalwarePlan",
                 1,
             ),
         ),
@@ -431,7 +644,8 @@ def test_platform_cloudformation_handler_contract_rejects_mutations(
         ValueError,
         match=(
             "handler|service-linked|deterministic|authorized|execution role|"
-            "inline role definitions|suppress"
+            "inline role definitions|suppress|DataKey|Artifact|data-key|deployment|"
+            "purpose-tagged"
         ),
     ):
         validator.validate_platform_cloudformation_handler_contract(
@@ -718,10 +932,13 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "idp-cli deploy --headless IdpCloudFormationExecutionRoleArn "
             "IdpRolePermissionsBoundaryArn PermissionsBoundaryArn= Set-AwsStatefulStackPolicy"
         ),
-        "scripts/deploy-platform.ps1": (
-            "PlatformCloudFormationExecutionRoleArn PlatformRolePermissionsBoundaryArn "
-            "Set-AwsStatefulStackPolicy"
-        ),
+            "scripts/deploy-platform.ps1": (
+                "PlatformCloudFormationExecutionRoleArn PlatformRolePermissionsBoundaryArn "
+                "Set-AwsStatefulStackPolicy "
+                "'--s3-bucket', [string]$bootstrap.ArtifactBucketName "
+                "'--s3-prefix', \"platform/$($config.environment)\" "
+                "'--kms-key-id', [string]$bootstrap.ArtifactKeyArn"
+            ),
         "infra/api/template.yaml": (
             platform_api_handler_template()
             + "# EntraTenantOidcProvider:\n"

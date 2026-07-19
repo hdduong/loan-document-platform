@@ -151,6 +151,8 @@ Resources:
           Value: loan-document-platform
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: KeyPurpose
+          Value: document-data
         - Key: DataClassification
           Value: confidential-loan-document
 

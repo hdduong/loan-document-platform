@@ -68,6 +68,8 @@ Resources:
           Value: loan-document-platform
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: KeyPurpose
+          Value: deployment-artifacts
 
   ArtifactKeyAlias:
     Type: AWS::KMS::Alias
@@ -250,6 +252,18 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:s3:::loan-document-${EnvironmentName}-source-${AWS::AccountId}-${AWS::Region}/*'
                   - !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${PlatformStackName}-*'
                   - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${PlatformStackName}-*'
+              - Sid: ReadPlatformDeploymentArtifacts
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${ArtifactBucket.Arn}/platform/${EnvironmentName}/*'
+              - Sid: DecryptPlatformDeploymentArtifacts
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt ArtifactKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 's3.${AWS::Region}.${AWS::URLSuffix}'
+                    kms:EncryptionContext:aws:s3:arn: !GetAtt ArtifactBucket.Arn
               - Sid: CreateExactEventSourceMapping
                 Effect: Allow
                 Action: lambda:CreateEventSourceMapping
@@ -269,6 +283,7 @@ Resources:
                   StringEquals:
                     aws:RequestTag/Application: loan-document-platform
                     aws:RequestTag/Environment: !Ref EnvironmentName
+                    aws:RequestTag/KeyPurpose: document-data
               - Sid: ManageTaggedDataKeys
                 Effect: Allow
                 Action: kms:*
@@ -277,6 +292,7 @@ Resources:
                   StringEquals:
                     aws:ResourceTag/Application: loan-document-platform
                     aws:ResourceTag/Environment: !Ref EnvironmentName
+                    aws:ResourceTag/KeyPurpose: document-data
               - Sid: ManageExactDataKeyAlias
                 Effect: Allow
                 Action:
