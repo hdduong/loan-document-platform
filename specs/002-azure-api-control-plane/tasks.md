@@ -252,6 +252,26 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 17: Pinned IDP Publisher Build Tools
+
+**Purpose**: Make every direct Python publisher prerequisite reproducible inside the managed IDP environment.
+
+- [x] T081 [P] [US4] Audit every upstream publisher child command and add lock/cache/order mutation coverage in `tests/test_powershell_deployment_helpers.py` and `tests/test_repository_validator.py`
+- [x] T082 [US4] Pin cfn-lint, Ruff, and uv in `vendor/idp.lock.json`, install them into the Python 3.12 IDP environment, include them in cache invalidation, force-repair missing launchers without dependency drift, and require metadata/executable smoke checks before marking the cache complete
+- [x] T083 [US4] Verify the pinned Ruff checks the exact IDP 0.5.16 source and record the publisher prerequisite and recovery contract in the active Spec Kit artifacts, README, quickstart, and runbook
+
+---
+
+## Phase 18: Repository-Owned Environment Configuration
+
+**Purpose**: Replace the successful workstation-only environment setup block with a reviewed, idempotent, fail-closed operator script while keeping all populated values local.
+
+- [x] T084 [P] [US4] Add helper, atomic-write, redaction, rerun, identity-mismatch, and repository-mutation coverage in `tests/test_environment_configuration.py`, `tests/test_azure_domain_deployment.py`, and `tests/test_repository_validator.py`
+- [x] T085 [US4] Implement `scripts/configure-environment.ps1` with safe Azure/AWS invocation, public-zone selection, canonical host/contact/CA validation, ignored-target enforcement, mismatch protection, and validated atomic replacement; propagate the configured CA path to all three CLI trust variables in `scripts/bootstrap.ps1`
+- [x] T086 [US4] Amend the scripted-operations governance rule and record the repository-owned setup command, local-only values, rerun behavior, and recovery boundary in `CLAUDE.md`, the active Spec Kit artifacts, README, and runbook
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
@@ -263,6 +283,7 @@ description: "Implementation tasks for moving the product API to Azure while ret
 - **US3 (Phase 5)**: Depends on US1 authorization/dispatch; read/grant tests may be authored in parallel with US2.
 - **US4 (Phase 6)**: Declarative Azure/AWS work may begin after Phase 2 settings are stable; deployment orchestration waits for US1–US3 runtime inputs.
 - **Phase 7 (Convergence)**: Documentation tasks can run after the relevant design stabilizes; full validation and review wait for all implementation phases.
+- **Phase 18 (Repository-Owned Environment Configuration)**: Depends on the shared safe CLI launchers and canonical environment validation; it can be reviewed independently of live cloud mutation and must complete before the configurator is a supported runbook step.
 
 ### User Story Dependencies
 

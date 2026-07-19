@@ -26,6 +26,60 @@ function Get-NormalizedTextSha256 {
     return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
 }
 
+function Assert-CertificateOnlyBundle {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw 'The configured corporate CA bundle does not exist.'
+    }
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $bundleInfo = Get-Item -LiteralPath $resolved
+    if ($bundleInfo.Length -le 0 -or $bundleInfo.Length -gt 10MB) {
+        throw 'The corporate CA bundle has an invalid size.'
+    }
+    $bundleText = [System.IO.File]::ReadAllText($resolved)
+    $pemBoundaries = [regex]::Matches(
+        $bundleText,
+        '(?m)^[^\S\r\n]*-----(?<Boundary>BEGIN|END) (?<Label>[^\r\n]+)-----[^\S\r\n]*\r?$'
+    )
+    $beginLabels = @(
+        $pemBoundaries | Where-Object { $_.Groups['Boundary'].Value -ceq 'BEGIN' }
+    )
+    $endLabels = @(
+        $pemBoundaries | Where-Object { $_.Groups['Boundary'].Value -ceq 'END' }
+    )
+    if ($beginLabels.Count -eq 0 -or
+        @($pemBoundaries | Where-Object { $_.Groups['Label'].Value -cne 'CERTIFICATE' }).Count -gt 0) {
+        throw 'The corporate CA bundle must contain certificates and no private key or other PEM object.'
+    }
+    $certificateBlocks = [regex]::Matches(
+        $bundleText,
+        '(?ms)-----BEGIN CERTIFICATE-----\s*(?<Body>[A-Za-z0-9+/=\r\n]+?)\s*-----END CERTIFICATE-----'
+    )
+    if ($certificateBlocks.Count -ne $beginLabels.Count -or
+        $endLabels.Count -ne $beginLabels.Count -or
+        $pemBoundaries.Count -ne (2 * $certificateBlocks.Count)) {
+        throw 'The corporate CA bundle contains an incomplete or invalid certificate block.'
+    }
+    foreach ($block in $certificateBlocks) {
+        $certificate = $null
+        try {
+            $base64 = $block.Groups['Body'].Value -replace '\s', ''
+            $rawCertificate = [Convert]::FromBase64String($base64)
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $rawCertificate
+            )
+            if ($certificate.RawData.Length -eq 0) { throw 'Empty certificate.' }
+        } catch {
+            throw 'The corporate CA bundle contains a certificate that cannot be parsed.'
+        } finally {
+            if ($null -ne $certificate) { $certificate.Dispose() }
+        }
+    }
+    return $resolved
+}
+
 function Read-EnvironmentConfig {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
@@ -96,6 +150,20 @@ function Read-EnvironmentConfig {
         if ($hostValue -notmatch '^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$' -or
             -not $hostValue.EndsWith($domainSuffix, [StringComparison]::Ordinal)) {
             throw "Environment file '$resolved' requires '$hostName' to be a valid subdomain of domainName."
+        }
+    }
+    foreach ($emailName in 'alertEmail', 'budgetEmail') {
+        $emailValue = [string]$config.$emailName
+        if ($emailValue.IndexOfAny([char[]]"`r`n") -ge 0) {
+            throw "Environment file '$resolved' requires '$emailName' to contain one email address without control characters."
+        }
+        try {
+            $parsedEmail = [System.Net.Mail.MailAddress]::new($emailValue)
+        } catch {
+            throw "Environment file '$resolved' requires '$emailName' to contain a valid email address."
+        }
+        if ($emailValue -cne $emailValue.Trim() -or $parsedEmail.Address -cne $emailValue) {
+            throw "Environment file '$resolved' requires '$emailName' to contain exactly one canonical email address."
         }
     }
     $minimumReplicas = [int]$config.azureApiMinReplicas
@@ -189,7 +257,7 @@ function Resolve-PythonLaunch {
     }
 
     if ($AllowMissing) { return $null }
-    throw "Python $Version is required for the pinned IDP CLI. Install that exact minor version without replacing the platform's Python 3.13 runtime."
+    throw "Python $Version is required. Install that exact minor version alongside the platform Python 3.13 and IDP Python 3.12 runtimes."
 }
 
 function Resolve-CommandSourceOutsidePath {
@@ -332,7 +400,7 @@ function Invoke-WithPrependedPath {
                     'Process'
                 )
             } else {
-                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue -WhatIf:$false
             }
         }
         $env:PATH = $originalPath
@@ -405,17 +473,24 @@ function Invoke-AzureCliLaunch {
 
     $hadInstaller = Test-Path Env:AZ_INSTALLER
     $previousInstaller = $env:AZ_INSTALLER
+    $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
     $exitCode = -1
     try {
+        if ($null -ne $nativePreference) {
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local -WhatIf:$false
+        }
         if ($launch.Installer) { $env:AZ_INSTALLER = $launch.Installer }
         $allArguments = @($launch.PrefixArguments) + $Arguments
-        $output = & $launch.FilePath @allArguments
+        $output = @(& $launch.FilePath @allArguments 2>$null)
         $exitCode = $LASTEXITCODE
     } finally {
+        if ($null -ne $nativePreference) {
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativePreference.Value -Scope Local -WhatIf:$false
+        }
         if ($hadInstaller) {
             $env:AZ_INSTALLER = $previousInstaller
         } else {
-            Remove-Item Env:AZ_INSTALLER -ErrorAction SilentlyContinue
+            Remove-Item Env:AZ_INSTALLER -ErrorAction SilentlyContinue -WhatIf:$false
         }
     }
     if ($exitCode -ne 0) {
@@ -452,10 +527,11 @@ function Invoke-Aws {
         [Parameter(Mandatory)][string]$Profile,
         [Parameter(Mandatory)][string]$Region,
         [Parameter(Mandatory)][string[]]$Arguments,
-        [switch]$CaptureJson
+        [switch]$CaptureJson,
+        [switch]$ForceProfile
     )
     $allArguments = @('--region', $Region, '--no-cli-pager') + $Arguments
-    if ($env:GITHUB_ACTIONS -ne 'true') {
+    if ($ForceProfile -or $env:GITHUB_ACTIONS -ne 'true') {
         $allArguments = @('--profile', $Profile) + $allArguments
     }
     if ($CaptureJson) { $allArguments += @('--output', 'json') }
@@ -464,13 +540,13 @@ function Invoke-Aws {
     $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
     try {
         if ($null -ne $nativePreference) {
-            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local -WhatIf:$false
         }
         $output = @(& aws @allArguments 2>$null)
         $exitCode = $LASTEXITCODE
     } finally {
         if ($null -ne $nativePreference) {
-            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativePreference.Value -Scope Local
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativePreference.Value -Scope Local -WhatIf:$false
         }
     }
     if ($exitCode -ne 0) {
@@ -492,11 +568,53 @@ function Assert-AwsIdentity {
     )
     $identity = Invoke-Aws -Profile $Profile -Region $Region -Arguments @('sts', 'get-caller-identity') -CaptureJson
     if ($ExpectedAccountId -and $identity.Account -ne $ExpectedAccountId) {
-        throw "AWS profile '$Profile' is account $($identity.Account), expected $ExpectedAccountId."
+        throw 'The authenticated AWS identity does not match the configured account.'
     }
-    $credentialSource = if ($env:GITHUB_ACTIONS -eq 'true') { 'GitHub OIDC' } else { "profile $Profile" }
-    Write-Host "AWS identity: $($identity.Arn) (account $($identity.Account), region $Region, source $credentialSource)"
+    Write-Host 'AWS identity and region verified.'
     return $identity
+}
+
+function Assert-AzureIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Account,
+        [string]$ExpectedSubscriptionId = '',
+        [string]$ExpectedTenantId = ''
+    )
+
+    $subscriptionProperty = $Account.PSObject.Properties['id']
+    $tenantProperty = $Account.PSObject.Properties['tenantId']
+    $subscriptionId = [guid]::Empty
+    $tenantId = [guid]::Empty
+    if ($null -eq $subscriptionProperty -or $null -eq $tenantProperty -or
+        -not [guid]::TryParse([string]$subscriptionProperty.Value, [ref]$subscriptionId) -or
+        -not [guid]::TryParse([string]$tenantProperty.Value, [ref]$tenantId)) {
+        throw 'Azure account lookup returned invalid identity identifiers.'
+    }
+
+    if ($ExpectedSubscriptionId) {
+        $expectedSubscription = [guid]::Empty
+        if (-not [guid]::TryParse($ExpectedSubscriptionId, [ref]$expectedSubscription)) {
+            throw 'The configured Azure subscription identifier is invalid.'
+        }
+        if ($subscriptionId -ne $expectedSubscription) {
+            throw 'The authenticated Azure subscription does not match the configured subscription.'
+        }
+    }
+    if ($ExpectedTenantId) {
+        $expectedTenant = [guid]::Empty
+        if (-not [guid]::TryParse($ExpectedTenantId, [ref]$expectedTenant)) {
+            throw 'The configured Azure tenant identifier is invalid.'
+        }
+        if ($tenantId -ne $expectedTenant) {
+            throw 'The authenticated Azure tenant does not match the configured tenant.'
+        }
+    }
+
+    return [pscustomobject]@{
+        SubscriptionId = $subscriptionId
+        TenantId = $tenantId
+    }
 }
 
 function Test-AwsCloudFormationStackNotFound {
@@ -540,13 +658,13 @@ function Get-AwsCloudFormationStackDescription {
     $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
     try {
         if ($null -ne $nativePreference) {
-            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local -WhatIf:$false
         }
         $raw = @(& aws @arguments 2>&1)
         $exitCode = $LASTEXITCODE
     } finally {
         if ($null -ne $nativePreference) {
-            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativePreference.Value -Scope Local
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativePreference.Value -Scope Local -WhatIf:$false
         }
     }
 
@@ -663,4 +781,4 @@ function Get-StackOutputs {
     return $result
 }
 
-Export-ModuleMember -Function Get-ProjectRoot, Get-NormalizedTextSha256, Read-EnvironmentConfig, Assert-Command, Resolve-PythonLaunch, Resolve-CommandSourceOutsidePath, Resolve-WindowsIdpCliBridge, Invoke-WithPrependedPath, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
+Export-ModuleMember -Function Get-ProjectRoot, Get-NormalizedTextSha256, Assert-CertificateOnlyBundle, Read-EnvironmentConfig, Assert-Command, Resolve-PythonLaunch, Resolve-CommandSourceOutsidePath, Resolve-WindowsIdpCliBridge, Invoke-WithPrependedPath, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Assert-AzureIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs

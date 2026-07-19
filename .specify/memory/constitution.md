@@ -79,6 +79,14 @@ reviewer, observable failure paths, bounded retries/DLQs, execution
 reconciliation, backups, and cost alerts. The USD 100 AWS monthly budget is an
 alerting guardrail, not a hard service stop.
 
+Every successful repeatable cloud-operation procedure used to configure,
+provision, validate, deploy, recover, or rotate the platform MUST be promoted
+to a parameterized repository script with automated validation and runbook
+instructions before it becomes a supported next step. Workstation paths,
+filled environment files, certificates, identifiers, contacts, credentials,
+and command output remain local and ignored; only the reusable procedure and
+synthetic tests enter review.
+
 ### VIII. Mandatory Exact-Head Copilot Review
 
 Every pull request MUST request GitHub Copilot code review, including drafts,
@@ -166,4 +174,4 @@ Every plan MUST include a constitution check, and every review MUST reject
 unjustified violations. `CLAUDE.md` supplies agent-specific operating context
 but cannot weaken this constitution.
 
-**Version**: 1.3.0 | **Ratified**: 2026-07-14 | **Last Amended**: 2026-07-16
+**Version**: 1.4.0 | **Ratified**: 2026-07-14 | **Last Amended**: 2026-07-18

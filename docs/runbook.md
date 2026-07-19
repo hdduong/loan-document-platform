@@ -18,7 +18,7 @@
 - IAM Identity Center AWS CLI profile with MFA. Do not create an access key.
 - Azure CLI login using the intended tenant/subscription. Do not create a client
   secret or download a publish profile.
-- PowerShell 7, Git, Python 3.13 for platform validation, a separate Python 3.12
+- PowerShell 7.2 or newer, Git, Python 3.13 for platform validation, a separate Python 3.12
   interpreter for the pinned IDP CLI, Node 22, AWS CLI v2, AWS SAM CLI, Azure
   CLI with Bicep, Docker, and WSL/Ubuntu for upstream IDP tooling.
 - Corporate TLS root CA configured for Azure/AWS/Graph/GitHub tooling when a
@@ -50,37 +50,54 @@ allowlisted, and `iam:PassRole` is limited to approved service principals.
 
 ## Clean-environment deployment order
 
-1. Create an ignored `config/environments/prod.json` from the example and supply
-   the AWS account/region/profile, Azure tenant/subscription/resource group/
-   region, DNS names, Entra display names/administrators, alert contacts, limits,
-   retention, and stack/resource names. Do not commit the filled file.
+1. Run `scripts/bootstrap.ps1 -InstallMissing` without an environment file to
+   install or verify the local toolchain before any repository script calls a
+   cloud CLI.
+2. Create an ignored `config/environments/prod.json` from the example and set
+   the environment-specific Azure/AWS/Entra resource names, regions, limits,
+   retention, and stack names. Do not edit the tracked example or commit the
+   filled file.
    `environment` is an exact enum (`dev`, `test`, `stage`, or `prod`); do not
    substitute `production` or an ad hoc suffix. UI and API hostnames must be
    canonical lowercase DNS names without a trailing dot.
    Keep `maximumQueryItems`, `maximumLoanArchiveDocuments`, and
    `maximumLoanArchiveManifestBytes` at reviewed values; deployment and runtime
    validation reject out-of-range or internally inconsistent limits.
-2. Run `scripts/bootstrap.ps1 -InstallMissing`, then run it with the ignored
-   environment file to verify the selected AWS account, Azure subscription, and
-   Entra tenant.
-3. Run `scripts/provision-github.ps1` to configure the public repository,
+3. Authenticate the intended Azure tenant/subscription, AWS profile, and GitHub
+   CLI account, then run
+   `scripts/configure-environment.ps1 -EnvironmentFile
+   ./config/environments/prod.json`. The script derives identity values from the
+   authenticated sessions, auto-selects the sole public Route 53 zone or
+   validates a masked hosted-zone ID, collects canonical UI/API hosts and alert
+   contacts through masked prompts, validates a sibling
+   UTF-8 candidate, and atomically replaces only the ignored file. It preserves
+   existing values on rerun and fails if an authenticated identity conflicts
+   with the file. If several AWS profiles exist, populate `awsProfile` in the
+   ignored file or pass `-AwsProfile`. Supply `-CorporateCaBundlePath` when the standard
+   `$HOME/.certs/cloud-ca-bundle.pem` location is not used. The bundle must
+   contain only parseable X.509 `CERTIFICATE` PEM blocks; every other PEM object
+   is rejected.
+4. Run `scripts/bootstrap.ps1 -EnvironmentFile
+   ./config/environments/prod.json` to verify the selected AWS account, Azure
+   subscription, and Entra tenant and compile the Azure template.
+5. Run `scripts/provision-github.ps1` to configure the public repository,
    protected environment, exact GitHub-to-AWS OIDC trust, AWS execution role,
    and encrypted artifact bucket.
-4. Push the reviewed baseline to `main`, then run
+6. Push the reviewed baseline to `main`, then run
    `scripts/configure-github-protection.ps1` to configure validation, exact-head
    Copilot review, resolved conversations, and the reviewer-gated `prod`
    environment.
-5. Run `scripts/provision-entra.ps1` for the product API, SPA, and optional
+7. Run `scripts/provision-entra.ps1` for the product API, SPA, and optional
    certificate-authenticated external machine client.
-6. Run `scripts/deploy-azure.ps1 -FoundationOnly` for the Azure foundation. It creates the
+8. Run `scripts/deploy-azure.ps1 -FoundationOnly` for the Azure foundation. It creates the
    user-assigned runtime identity, registry, Container Apps environment,
    observability resources, Static Web App, Azure budget, and safe outputs; it
    deliberately creates no public Container App yet.
-7. Run `scripts/provision-entra-federation.ps1` to create the dedicated v1
+9. Run `scripts/provision-entra-federation.ps1` to create the dedicated v1
    federation audience and assign only the API managed identity. Then run
    `scripts/provision-github-azure.ps1` for exact GitHub environment OIDC and
    exact ACR/resource-group scopes, followed by `scripts/sync-github-entra.ps1`.
-8. On a first installation only, run
+10. On a first installation only, run
    `scripts/deploy-platform.ps1 -AllowMissingIdp` to deploy the private AWS
    data/processing runtime and the
    exact Azure-workload OIDC provider/role trust before the IDP stack exists.
@@ -88,7 +105,7 @@ allowlisted, and `iam:PassRole` is limited to approved service principals.
    every required output can be resolved. The platform retains DynamoDB,
    S3/KMS, GuardDuty, processors, queues, backups, and alarms but does not deploy
    API Gateway or a Loan API Lambda.
-9. Run `scripts/deploy-idp.ps1` to deploy the pinned `--headless` IDP stack and
+11. Run `scripts/deploy-idp.ps1` to deploy the pinned `--headless` IDP stack and
    upload/activate `cd-screen-v1` and `cd-full-v1`. The script creates an
    ABI-qualified Python 3.12 virtual environment because IDP 0.5.16 pins NumPy
    1.26.4; it rejects Python 3.13 rather than compiling or changing that upstream
@@ -97,8 +114,10 @@ allowlisted, and `iam:PassRole` is limited to approved service principals.
    only that virtual environment, and smoke-tests both tools without `cmd.exe`
    before publishing. AppSync and Jobs REST are not enabled. Repair the official
    installation for a layout failure; use `-ReinstallCli` only to rebuild the
-   managed local environment and relays.
-10. Re-run `scripts/deploy-platform.ps1` without `-AllowMissingIdp`. This pass is
+   managed local environment and relays. That rebuild also restores the
+   lock-pinned cfn-lint, Ruff, and uv publisher tools; all three must pass their
+   version checks before the cache marker is written.
+12. Re-run `scripts/deploy-platform.ps1` without `-AllowMissingIdp`. This pass is
     required: it binds processor environment/IAM values to the deployed IDP
     buckets, KMS key, and state machine, then verifies the stored CloudFormation
     parameters and conditional IDP event resources.
@@ -112,7 +131,7 @@ standard workflow, verify backups/restores and the exact change set, use a
 separately approved temporary stack-policy override, and immediately restore
 and re-verify the committed policy. Never weaken the committed policy as part of
 an ordinary release.
-11. Build the Azure API container, resolve the immutable digest, and deploy a
+13. Build the Azure API container, resolve the immutable digest, and deploy a
     Container Apps revision through `scripts/deploy-azure.ps1 -BindCustomDomain`.
     The script invokes the repository-owned `infra/azure/acr-build-api.yml`
     multi-step ACR task. That task explicitly enables BuildKit, builds from
@@ -126,17 +145,17 @@ an ordinary release.
     binding. A prior interrupted run may resume its exact `Disabled`/no-certificate
     binding only with `-BindCustomDomain`; managed-certificate issuance is
     bounded and must reach `Succeeded` before binding.
-12. Probe `/health` and `/ready` on the default Container Apps hostname. Run
+14. Probe `/health` and `/ready` on the default Container Apps hostname. Run
     negative federation/authorization tests and authenticated `/v1` synthetic
     smoke through the bound custom hostname using reviewed host-pinned TLS
     resolution before DNS changes. Production rejects product routes on the
     provider hostname. The deployment script's pinned Trivy gate scans the
     exact ACR digest, emits an ignored CycloneDX SBOM, and blocks the revision
     and traffic cutover on fixable HIGH/CRITICAL findings.
-13. Run `scripts/cutover-api-domain.ps1`; it snapshots exact Route 53 records,
+15. Run `scripts/cutover-api-domain.ps1`; it snapshots exact Route 53 records,
     changes the CNAME, tests HTTPS/deep readiness, and automatically restores
     prior records on failure.
-14. After the React scaffold exists, run `scripts/deploy-web.ps1` to build/test
+16. After the React scaffold exists, run `scripts/deploy-web.ps1` to build/test
     and publish to Azure Static Web Apps. `-BindCustomDomain` performs an explicit
     UI CNAME cutover with rollback and writes a public `runtime-config.json` that
     points only to the accepted Azure API hostname. Every production UI publish
@@ -146,7 +165,7 @@ an ordinary release.
 
 While the React scaffold is absent, run `scripts/deploy-all.ps1` with
 `-SkipAzureFoundation`, `-SkipEntra`, `-SkipWeb`, and
-`-BindApiCustomDomain` to orchestrate steps 8–13 after the one-time identity
+`-BindApiCustomDomain` to orchestrate steps 9–14 after the one-time identity
 bootstrap, then invoke
 `scripts/cutover-api-domain.ps1` only after the acceptance pause. Once the UI
 exists, omit `-SkipWeb` and use `-BindUiCustomDomain` only for its separately

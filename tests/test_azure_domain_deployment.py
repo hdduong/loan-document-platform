@@ -96,6 +96,27 @@ def test_powershell_environment_config_requires_lowercase_acr_name(tmp_path: Pat
     assert "lowercase alphanumeric Azure Container Registry" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("alertEmail", "not-an-email"),
+        ("budgetEmail", "budget@example.com\r\nBcc:other@example.com"),
+        ("alertEmail", "alerts@example.com,other@example.com"),
+        ("alertEmail", " alerts@example.com "),
+    ],
+)
+def test_powershell_environment_config_rejects_invalid_contact_email(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    values = environment_config()
+    values[field] = value
+
+    completed = read_environment_config(tmp_path, values)
+
+    assert completed.returncode != 0
+    assert field in completed.stderr
+
+
 def test_powershell_scaling_rejects_replica_count_above_azure_limit(tmp_path: Path) -> None:
     values = environment_config()
     values["azureApiMaxReplicas"] = 301

@@ -17,6 +17,11 @@ IDP_DIR = ROOT / "config" / "idp"
 SPEC_KIT_VERSION = "0.12.15"
 SPEC_KIT_COMMIT = "7b91c1eda46e1107a53831cd3f14f608b4b7bad0"
 GITHUB_REPOSITORY = "hdduong/aws-idp-custom-platform"
+PRIVATE_KEY_PEM_PATTERN = re.compile(
+    r"-----BEGIN "
+    + r"[^\r\n]*"
+    + r"PRIVATE KEY-----"
+)
 SPEC_KIT_SKILLS = {
     "speckit-analyze",
     "speckit-checklist",
@@ -1069,6 +1074,11 @@ def validate_idp_python_toolchain_contract(
         lock.get("cliPythonVersion") == "3.12",
         "Pinned IDP 0.5.16 CLI must use Python 3.12.",
     )
+    require(
+        lock.get("cliBuildTools")
+        == {"cfnLint": "1.53.0", "ruff": "0.15.21", "uv": "0.9.6"},
+        "Pinned IDP publisher build-tool versions changed.",
+    )
     for fragment in (
         "Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)",
         "foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm')",
@@ -1076,12 +1086,30 @@ def validate_idp_python_toolchain_contract(
         "lib/idp_common_pkg')[all]",
         "'-m', 'pip', 'check'",
         'm.version(\"numpy\") == \"1.26.4\"',
+        '"cfn-lint==$($lock.cliBuildTools.cfnLint)"',
+        '"ruff==$($lock.cliBuildTools.ruff)"',
+        '"uv==$($lock.cliBuildTools.uv)"',
+        "'--force-reinstall', '--no-deps'",
+        "|tools=$buildToolIdentity",
+        "$buildToolExecutables = @(",
+        "($bridgeExecutables + $buildToolExecutables)",
+        "foreach ($requiredExecutable in ($bridgeExecutables + $buildToolExecutables))",
+        "m.version('cfn-lint')",
+        "m.version('ruff')",
+        "m.version('uv')",
+        "Invoke-Checked -Command ruff -Arguments @('--version')",
+        "Invoke-Checked -Command cfn-lint -Arguments @('--version')",
+        "Invoke-Checked -Command uv -Arguments @('--version')",
         "Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment",
     ):
         require(fragment in deploy_script, f"Pinned IDP Python gate lacks: {fragment}")
     require(
         "foreach ($command in 'aws', 'git', 'python'," not in deploy_script,
         "IDP deployment must not require generic Python before exact-minor resolution.",
+    )
+    require(
+        deploy_script.count("'--force-reinstall', '--no-deps'") == 2,
+        "IDP repair must force-reinstall both publisher tools and the Windows bridge.",
     )
     for fragment in (
         "Python.Python.3.13",
@@ -1099,6 +1127,12 @@ def validate_idp_python_toolchain_contract(
         _setup_python_versions(validation_workflow, "validate.yml") == ["3.13"],
         "Pull-request validation must remain on platform Python 3.13 only.",
     )
+    for executable in ("ruff", "cfn-lint", "uv"):
+        require(
+            deploy_script.index(f"Invoke-Checked -Command {executable} -Arguments @('--version')")
+            < deploy_script.index("[IO.File]::WriteAllText($installMarker"),
+            f"Pinned publisher tool {executable} must pass before the cache marker is written.",
+        )
 
 
 def validate_idp_windows_bridge_contract(
@@ -1464,6 +1498,11 @@ def validate_azure_control_plane() -> None:
 
     lock = load_json(ROOT / "vendor" / "idp.lock.json")
     require(lock.get("deploymentMode") == "headless", "The pinned IDP deployment must remain headless.")
+    for package, key in (("cfn-lint", "cfnLint"), ("ruff", "ruff")):
+        require(
+            f"{package}=={lock.get('cliBuildTools', {}).get(key, '')}" in development_requirements,
+            f"IDP publisher pin for {package} must match requirements-dev.txt.",
+        )
     idp_deploy = (ROOT / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
     require("--headless" in idp_deploy, "The IDP deployment script must enforce --headless.")
     validate_idp_python_toolchain_contract(
@@ -1872,6 +1911,110 @@ def validate_spec_kit() -> None:
     require("Mandatory Coverage and Browser Integration" in constitution, "Constitution lacks coverage governance.")
 
 
+def validate_environment_configuration_script(
+    configurator: str,
+    common: str,
+    bootstrap: str,
+    gitignore: str,
+    constitution: str,
+) -> None:
+    required_fragments = (
+        "#requires -Version 7.2",
+        "Invoke-AzureCli -Arguments",
+        "Assert-AzureIdentity -Account $azureAccount",
+        "Invoke-Aws -Profile",
+        "Assert-CertificateOnlyBundle -Path $bundleCandidate",
+        "Assert-ExistingValueMatches -Config $config -Name 'azureSubscriptionId'",
+        "Assert-ExistingValueMatches -Config $config -Name 'entraTenantId'",
+        "Assert-ExistingValueMatches -Config $config -Name 'awsAccountId'",
+        "'check-ignore', '--quiet'",
+        "Where-Object { -not [bool]$_.Config.PrivateZone }",
+        "Read-EnvironmentConfig -Path $temporaryPath",
+        "[System.Text.UTF8Encoding]::new($false)",
+        "[System.IO.File]::Replace($validatedConfigPath, $resolvedEnvironmentFile, $backupConfigPath, $true)",
+        "$env:REQUESTS_CA_BUNDLE = $resolvedBundle",
+        "$env:SSL_CERT_FILE = $resolvedBundle",
+        "$env:AWS_CA_BUNDLE = $resolvedBundle",
+        "Remove-Item -LiteralPath $validatedConfigPath -Force -WhatIf:$false",
+        "Read-Host 'Route 53 hosted-zone ID' -MaskInput",
+        "Read-Host 'UI hostname (leave blank for the deterministic default)' -MaskInput",
+        "Read-Host 'API hostname (leave blank for the deterministic default)' -MaskInput",
+        "Cloud identifiers, contacts, profile names, and the complete configuration were not displayed.",
+    )
+    for fragment in required_fragments:
+        require(
+            fragment in configurator,
+            f"Repository-owned environment configuration lacks: {fragment}",
+        )
+    for forbidden_fragment in (
+        "Assert-AwsIdentity",
+        "C:\\Users\\",
+        "Set-Content -LiteralPath $resolvedEnvironmentFile",
+        'Write-Host "AWS identity:',
+        "$publicZones[$index].Name",
+        'Read-Host "UI hostname [$defaultUiHost]"',
+        'Read-Host "API hostname [$defaultApiHost]"',
+        "$selectedAlertEmail = $AlertEmail.Trim()",
+        "$selectedBudgetEmail = $BudgetEmail.Trim()",
+    ):
+        require(
+            forbidden_fragment not in configurator,
+            f"Repository-owned environment configuration exposes or weakens: {forbidden_fragment}",
+        )
+    require(
+        configurator.count(") -CaptureJson -ForceProfile") == 2,
+        "Repository-owned environment configuration must force the selected AWS profile for identity and Route 53 reads.",
+    )
+    for fragment in (
+        "function Assert-CertificateOnlyBundle",
+        "$pemBoundaries | Where-Object { $_.Groups['Label'].Value -cne 'CERTIFICATE' }",
+        "X509Certificate2]::new(",
+        "function Assert-AzureIdentity",
+        "Azure account lookup returned invalid identity identifiers.",
+        "[switch]$ForceProfile",
+        "if ($ForceProfile -or $env:GITHUB_ACTIONS -ne 'true')",
+        "$output = @(& $launch.FilePath @allArguments 2>$null)",
+        "PSNativeCommandUseErrorActionPreference",
+        "Write-Host 'AWS identity and region verified.'",
+    ):
+        require(fragment in common, f"Shared configuration safety lacks: {fragment}")
+    for forbidden_fragment in ("$identity.Arn", "expected $ExpectedAccountId"):
+        require(
+            forbidden_fragment not in common,
+            f"Shared identity verification exposes cloud identifiers: {forbidden_fragment}",
+        )
+    for fragment in (
+        "#requires -Version 7.2",
+        "Assert-CertificateOnlyBundle -Path",
+        "Invoke-AzureCli -Arguments",
+        "Assert-AzureIdentity @azureIdentityArguments",
+        "Resolve-PythonLaunch -Version '3.13'",
+    ):
+        require(fragment in bootstrap, f"Bootstrap identity/trust safety lacks: {fragment}")
+    require(
+        "[guid]$azAccount" not in bootstrap,
+        "Bootstrap must not cast raw Azure identity values before redacted validation.",
+    )
+    require(
+        "& python --version" not in bootstrap,
+        "Bootstrap must verify the resolved platform Python 3.13 runtime, not PATH's generic Python.",
+    )
+    for variable in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "AWS_CA_BUNDLE"):
+        require(
+            f"$env:{variable} = $caPath" in bootstrap,
+            f"Bootstrap does not restore the configured {variable} trust path.",
+        )
+    require(
+        "config/environments/*.json" in gitignore
+        and "!config/environments/*.example.json" in gitignore,
+        "Real environment files must remain ignored while examples stay reviewed.",
+    )
+    require(
+        "successful repeatable cloud-operation procedure" in constitution,
+        "Constitution does not require successful operator procedures to become reviewed scripts.",
+    )
+
+
 def main() -> None:
     ignored_roots = {
         ".git",
@@ -1901,6 +2044,13 @@ def main() -> None:
     validate_python_quality_gate()
     validate_web_quality_gate()
     validate_azure_control_plane()
+    validate_environment_configuration_script(
+        (ROOT / "scripts" / "configure-environment.ps1").read_text(encoding="utf-8"),
+        (ROOT / "scripts" / "common.psm1").read_text(encoding="utf-8"),
+        (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8"),
+        (ROOT / ".gitignore").read_text(encoding="utf-8"),
+        (ROOT / ".specify" / "memory" / "constitution.md").read_text(encoding="utf-8"),
+    )
 
     environment_example = load_json(ROOT / "config" / "environments" / "prod.example.json")
     require(
@@ -2000,7 +2150,7 @@ def main() -> None:
     secret_patterns = {
         "AWS access key": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
         "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-        "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        "private key": PRIVATE_KEY_PEM_PATTERN,
     }
     for path in files:
         require(path.suffix.lower() not in prohibited_suffixes, f"Prohibited sensitive/binary file: {path}")
