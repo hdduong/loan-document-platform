@@ -62,7 +62,7 @@ foreach ($entry in @(
     @{ Path = $screenPath; Expected = [string]$manifest.screen.sourceSha256; Name = $manifest.screen.name },
     @{ Path = $fullPath; Expected = [string]$manifest.full.sourceSha256; Name = $manifest.full.name }
 )) {
-    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.Path).Hash.ToLowerInvariant()
+    $actual = Get-NormalizedTextSha256 -Path $entry.Path
     if ($actual -ne $entry.Expected) {
         throw "IDP configuration '$($entry.Name)' hash is $actual, expected $($entry.Expected)."
     }

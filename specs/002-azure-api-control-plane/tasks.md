@@ -222,6 +222,16 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 14: Cross-Platform IDP Digest Contract
+
+**Purpose**: Keep reviewed IDP configuration identity stable across Git checkout line endings without weakening content verification.
+
+- [x] T072 [P] [US4] Add LF, CRLF, CR, invalid-UTF-8, and deployment/generator adoption regressions in `tests/test_powershell_deployment_helpers.py`
+- [x] T073 [US4] Export one strict UTF-8 LF-normalized SHA-256 helper from `scripts/common.psm1` and use it in `scripts/new-screen-config.ps1` and `scripts/deploy-idp.ps1`
+- [x] T074 [US4] Record the cross-platform digest algorithm and fail-closed encoding gate in the active Spec Kit artifacts and quickstart
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

@@ -102,6 +102,8 @@ Packaged Lambda code remains in the bootstrap artifact bucket, not the retained 
 
 Lambda validates event-source filter strings only when it creates or updates the mapping, after SAM and CloudFormation static template checks have passed. Repository validation therefore parses every declared mapping filter as JSON with duplicate-key rejection before packaging. It also compares the upload-completion filter structurally to the reviewed contract: DynamoDB `INSERT` or `MODIFY`, new-image `entityType=UPLOAD`, and new-image `status=VALIDATING`. Delimiter errors, non-object patterns, duplicate keys, extra filters, and semantic broadening fail locally and in pull-request validation.
 
+IDP configuration digests identify reviewed text rather than a workstation's checkout convention. One exported PowerShell helper decodes strict UTF-8, normalizes CRLF and bare CR to LF, re-encodes without adding a byte-order mark, and computes SHA-256. An existing UTF-8 byte-order mark remains significant content, as do whitespace, final newline, and Unicode composition; only line endings are normalized. The configuration generator and deployment preflight use that helper, matching the Python repository validator's algorithm exactly. This preserves one manifest identity across Windows and Linux while still rejecting invalid encoding or any content change before an IDP build or upload.
+
 ## Project Structure
 
 ### Documentation (this feature)

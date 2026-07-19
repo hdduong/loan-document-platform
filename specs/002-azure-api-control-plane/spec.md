@@ -88,6 +88,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 15. **Given** SAM packages a platform Lambda under the environment-specific artifact prefix, **When** CloudFormation creates the function, **Then** its execution role can read only that artifact prefix and decrypt only the bootstrap artifact key.
 16. **Given** document-data and deployment-artifact keys share the application and environment tags, **When** the platform execution role evaluates broad document-key lifecycle operations, **Then** the distinct `KeyPurpose` condition excludes the deployment artifact key.
 17. **Given** the platform template declares a DynamoDB stream filter, **When** repository validation runs before packaging, **Then** malformed JSON, duplicate keys, non-object patterns, added OR filters, and drift from the exact `UPLOAD`/`VALIDATING` event contract are rejected.
+18. **Given** Git checks out a reviewed IDP JSON file with LF, CRLF, or CR line endings, **When** generation, repository validation, or deployment verifies its manifest digest, **Then** every path computes the same SHA-256 over strict UTF-8 text normalized to LF and invalid UTF-8 fails closed.
 
 ### Edge Cases
 
@@ -142,6 +143,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **FR-035**: The platform CloudFormation execution role MUST read packaged Lambda code only from `${ArtifactBucket.Arn}/platform/${EnvironmentName}/*`, using only `s3:GetObject`, and MUST decrypt only `ArtifactKey` through regional S3 with the exact artifact-bucket encryption context; list, version, write, cross-environment, and wildcard artifact access are prohibited.
 - **FR-036**: Platform document-data keys MUST carry `KeyPurpose=document-data`, bootstrap artifact keys MUST carry `KeyPurpose=deployment-artifacts`, and every create/manage document-key grant MUST require the corresponding purpose tag so `kms:*` document lifecycle access cannot match the artifact key.
 - **FR-037**: Every Lambda event-source filter in the platform template MUST be a literal, syntactically valid JSON object with unique keys before packaging; the upload-completion mapping MUST match only DynamoDB `INSERT` or `MODIFY` records whose new image is an `UPLOAD` in `VALIDATING` status.
+- **FR-038**: IDP configuration generation, repository validation, and deployment preflight MUST verify manifest SHA-256 values using the same strict UTF-8, LF-normalized text bytes; raw checkout line endings MUST NOT change the reviewed identity, and invalid UTF-8 MUST fail before build or upload.
 
 ### Key Entities
 
@@ -180,6 +182,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **SC-021**: Mutation tests prove that changing either key-purpose tag or removing/broadening either request/resource purpose condition fails repository validation.
 - **SC-022**: Repository validation proves that SAM packaging uses exactly the bootstrap artifact bucket, `platform/${environment}` prefix, and bootstrap artifact key expected by the execution-role policy.
 - **SC-023**: Structured filter tests reject malformed delimiters, duplicate JSON keys, non-object patterns, and semantic drift from the exact upload-completion DynamoDB event contract before CloudFormation deployment.
+- **SC-024**: PowerShell helper tests prove LF, CRLF, and CR encodings of identical reviewed text produce one manifest digest, invalid UTF-8 is rejected, and both IDP generation and deployment use the shared normalized-digest helper.
 
 ## Assumptions
 

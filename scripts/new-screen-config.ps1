@@ -6,20 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-
-function Get-NormalizedTextSha256 {
-    param([Parameter(Mandatory)][string]$Path)
-
-    $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path).Path)
-    $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n")
-    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($normalized)
-    $algorithm = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        return ([System.BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $algorithm.Dispose()
-    }
-}
+Import-Module (Join-Path $PSScriptRoot 'common.psm1') -Force
 
 $fullConfigPath = (Resolve-Path -LiteralPath $FullConfigPath).Path
 $config = Get-Content -Raw -LiteralPath $fullConfigPath | ConvertFrom-Json -Depth 100
