@@ -147,6 +147,14 @@ def _cloudformation_scalar(value: Any) -> str | None:
     return None
 
 
+def _cloudformation_sub_equals(value: Any, expected: str) -> bool:
+    return (
+        isinstance(value, CloudFormationTaggedValue)
+        and value.tag == "Sub"
+        and value.value == expected
+    )
+
+
 def _iam_scope_patterns(
     raw_values: Any, *, allow_substitutions: bool
 ) -> list[str] | None:
@@ -235,6 +243,23 @@ def _statement_scope_covers_cloudformation_transform(
         )
         resource_matches = not provably_excludes_transform
     return action_matches and resource_matches
+
+
+def _statement_action_scope_matches(
+    statement: dict[str, Any], target_action: str
+) -> bool | None:
+    """Return whether an IAM Action/NotAction scope covers one literal action."""
+
+    uses_action = "Action" in statement
+    raw_actions = statement.get("Action", statement.get("NotAction"))
+    action_patterns = _iam_scope_patterns(raw_actions, allow_substitutions=uses_action)
+    if action_patterns is None:
+        return None
+    pattern_matches = any(
+        _iam_glob_matches(target_action.lower(), pattern.lower())
+        for pattern in action_patterns
+    )
+    return pattern_matches if uses_action else not pattern_matches
 
 
 def validate_serverless_transform_execution_roles(template_text: str) -> None:
@@ -352,6 +377,275 @@ def validate_serverless_transform_execution_roles(template_text: str) -> None:
         and {id(statement) for statement in transform_access}
         == {id(statement) for statement in expected_statements},
         "AWS Serverless transform access must remain exclusive to the two exact execution-role statements.",
+    )
+
+
+def validate_platform_cloudformation_handler_contract(
+    api_template_text: str, bootstrap_template_text: str
+) -> None:
+    """Keep generated resource names and CloudFormation handler permissions aligned."""
+
+    try:
+        api_template = yaml.load(api_template_text, Loader=CloudFormationSafeLoader)
+        bootstrap_template = yaml.load(bootstrap_template_text, Loader=CloudFormationSafeLoader)
+    except yaml.YAMLError as exc:
+        raise ValueError("AWS platform and bootstrap templates must be valid CloudFormation YAML.") from exc
+
+    require(isinstance(api_template, dict), "AWS platform template must be a mapping.")
+    require(isinstance(bootstrap_template, dict), "AWS bootstrap template must be a mapping.")
+    for template_name, template in (
+        ("platform", api_template),
+        ("bootstrap", bootstrap_template),
+    ):
+        parameters = template.get("Parameters")
+        environment_name = (
+            parameters.get("EnvironmentName") if isinstance(parameters, dict) else None
+        )
+        require(
+            isinstance(environment_name, dict)
+            and environment_name.get("Type") == "String"
+            and environment_name.get("AllowedPattern") == "[a-z0-9-]+"
+            and environment_name.get("MaxLength") == 13,
+            f"AWS {template_name} EnvironmentName must keep deterministic S3 names valid.",
+        )
+
+    api_resources = api_template.get("Resources")
+    require(isinstance(api_resources, dict), "AWS platform template must declare Resources.")
+    resource_name_contracts = (
+        (
+            "RegistryTable",
+            "AWS::DynamoDB::Table",
+            "TableName",
+            "loan-document-${EnvironmentName}-registry",
+        ),
+        (
+            "SourceBucket",
+            "AWS::S3::Bucket",
+            "BucketName",
+            "loan-document-${EnvironmentName}-source-${AWS::AccountId}-${AWS::Region}",
+        ),
+    )
+    for logical_id, resource_type, property_name, expected_name in resource_name_contracts:
+        resource = api_resources.get(logical_id)
+        properties = resource.get("Properties") if isinstance(resource, dict) else None
+        require(
+            isinstance(resource, dict)
+            and resource.get("Type") == resource_type
+            and isinstance(properties, dict)
+            and _cloudformation_sub_equals(properties.get(property_name), expected_name),
+            f"{logical_id} must use the deterministic name authorized for its "
+            "CloudFormation handler.",
+        )
+
+    bootstrap_resources = bootstrap_template.get("Resources")
+    require(isinstance(bootstrap_resources, dict), "AWS bootstrap template must declare Resources.")
+    platform_role = bootstrap_resources.get("PlatformCloudFormationExecutionRole")
+    platform_properties = (
+        platform_role.get("Properties") if isinstance(platform_role, dict) else None
+    )
+    require(
+        isinstance(platform_role, dict)
+        and platform_role.get("Type") == "AWS::IAM::Role"
+        and isinstance(platform_properties, dict)
+        and not platform_properties.get("ManagedPolicyArns"),
+        "Platform CloudFormation execution role must remain an inline-policy IAM role.",
+    )
+    platform_statements = _inline_role_statements(platform_role)
+
+    standalone_role_attachments = []
+    for logical_id, resource in bootstrap_resources.items():
+        if not isinstance(resource, dict) or resource.get("Type") not in {
+            "AWS::IAM::Policy",
+            "AWS::IAM::ManagedPolicy",
+        }:
+            continue
+        properties = resource.get("Properties")
+        roles = properties.get("Roles") if isinstance(properties, dict) else None
+        if roles:
+            standalone_role_attachments.append(logical_id)
+    require(
+        not standalone_role_attachments,
+        "Bootstrap IAM policies must not bypass reviewed inline role definitions with Roles attachments.",
+    )
+
+    def action_candidates(target_actions: set[str], reviewed_sids: set[str]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for statement in platform_statements:
+            matches = [
+                _statement_action_scope_matches(statement, target_action)
+                for target_action in target_actions
+            ]
+            require(
+                all(match is not None for match in matches),
+                "Platform CloudFormation handler IAM actions must be statically reviewable.",
+            )
+            if statement.get("Sid") in reviewed_sids or any(matches):
+                candidates.append(statement)
+        return candidates
+
+    def action_scope_targets_services(
+        statement: dict[str, Any], services: set[str]
+    ) -> bool:
+        if statement.get("Effect") != "Allow":
+            return False
+        if "NotAction" in statement:
+            return True
+        action_patterns = _iam_scope_patterns(
+            statement.get("Action"), allow_substitutions=True
+        )
+        require(
+            action_patterns is not None,
+            "Platform CloudFormation handler IAM actions must be statically reviewable.",
+        )
+        for pattern in action_patterns:
+            if pattern == "*":
+                return True
+            parts = pattern.lower().split(":", 1)
+            if len(parts) == 2 and any(
+                _iam_glob_matches(service, parts[0]) for service in services
+            ):
+                return True
+        return False
+
+    def resource_pattern_targets_services(pattern: str, services: set[str]) -> bool:
+        if pattern == "*":
+            return True
+        parts = pattern.split(":", 5)
+        return len(parts) == 6 and any(
+            _iam_glob_matches(service, parts[2].lower()) for service in services
+        )
+
+    expected_resource_arns = {
+        "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:"
+        "table/loan-document-${EnvironmentName}-registry",
+        "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:"
+        "table/loan-document-${EnvironmentName}-registry/*",
+        "arn:${AWS::Partition}:s3:::loan-document-${EnvironmentName}-source-"
+        "${AWS::AccountId}-${AWS::Region}",
+        "arn:${AWS::Partition}:s3:::loan-document-${EnvironmentName}-source-"
+        "${AWS::AccountId}-${AWS::Region}/*",
+    }
+    identity_statements = action_candidates(
+        {"dynamodb:DescribeTable", "s3:CreateBucket"},
+        {"ExactPlatformResources"},
+    )
+    identity_statement = identity_statements[0] if len(identity_statements) == 1 else {}
+    identity_actions = identity_statement.get("Action")
+    identity_resources = identity_statement.get("Resource")
+    identity_actions = identity_actions if isinstance(identity_actions, list) else []
+    identity_resources = identity_resources if isinstance(identity_resources, list) else []
+    identity_resource_patterns = [
+        _cloudformation_scalar(value) for value in identity_resources
+    ]
+    relevant_identity_resources = [
+        value
+        for value in identity_resources
+        if (_cloudformation_scalar(value) or "").startswith(
+            (
+                "arn:${AWS::Partition}:dynamodb:",
+                "arn:${AWS::Partition}:s3:::",
+            )
+        )
+    ]
+    relevant_identity_grants = [
+        statement
+        for statement in platform_statements
+        if action_scope_targets_services(statement, {"dynamodb", "s3"})
+    ]
+    require(
+        len(identity_statements) == 1
+        and len(relevant_identity_grants) == 1
+        and relevant_identity_grants[0] is identity_statement
+        and set(identity_statement) == {"Sid", "Effect", "Action", "Resource"}
+        and identity_statement.get("Sid") == "ExactPlatformResources"
+        and identity_statement.get("Effect") == "Allow"
+        and {
+            action
+            for action in identity_actions
+            if isinstance(action, str)
+            and (
+                _iam_glob_matches("dynamodb:describetable", action.lower())
+                or _iam_glob_matches("s3:createbucket", action.lower())
+            )
+        }
+        == {"dynamodb:*", "s3:*"}
+        and all(pattern is not None for pattern in identity_resource_patterns)
+        and all(
+            not resource_pattern_targets_services(pattern, {"dynamodb", "s3"})
+            or pattern in expected_resource_arns
+            for pattern in identity_resource_patterns
+            if pattern is not None
+        )
+        and len(relevant_identity_resources) == len(expected_resource_arns)
+        and all(
+            isinstance(value, CloudFormationTaggedValue) and value.tag == "Sub"
+            for value in relevant_identity_resources
+        )
+        and {
+            _cloudformation_scalar(value) for value in relevant_identity_resources
+        }
+        == expected_resource_arns,
+        "Platform CloudFormation resource names must match the exact authorized table and bucket ARNs.",
+    )
+
+    expected_mount_actions = {
+        "backup-storage:Mount",
+        "backup-storage:MountCapsule",
+    }
+    mount_statements = action_candidates(
+        {"backup-storage:Mount", "backup-storage:MountCapsule"},
+        {"MountEncryptedBackupVault"},
+    )
+    require(
+        len(mount_statements) == 1
+        and set(mount_statements[0]) == {"Sid", "Effect", "Action", "Resource"}
+        and mount_statements[0].get("Sid") == "MountEncryptedBackupVault"
+        and mount_statements[0].get("Effect") == "Allow"
+        and mount_statements[0].get("Resource") == "*"
+        and isinstance(mount_statements[0].get("Action"), list)
+        and set(mount_statements[0]["Action"]) == expected_mount_actions,
+        "Platform CloudFormation must allow only the reviewed Backup vault handler actions.",
+    )
+
+    backup_role_arn = (
+        "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/"
+        "backup.amazonaws.com/AWSServiceRoleForBackup"
+    )
+    expected_service_linked_role_sids = {
+        "GuardDutyServiceLinkedRole",
+        "BackupServiceLinkedRole",
+    }
+    service_linked_role_statements = action_candidates(
+        {"iam:CreateServiceLinkedRole"},
+        expected_service_linked_role_sids,
+    )
+    service_linked_role_by_sid = {
+        statement.get("Sid"): statement for statement in service_linked_role_statements
+    }
+    guardduty_statement = service_linked_role_by_sid.get("GuardDutyServiceLinkedRole")
+    backup_statement = service_linked_role_by_sid.get("BackupServiceLinkedRole")
+    require(
+        len(service_linked_role_statements) == len(expected_service_linked_role_sids)
+        and set(service_linked_role_by_sid) == expected_service_linked_role_sids
+        and guardduty_statement
+        == {
+            "Sid": "GuardDutyServiceLinkedRole",
+            "Effect": "Allow",
+            "Action": "iam:CreateServiceLinkedRole",
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {"iam:AWSServiceName": "guardduty.amazonaws.com"}
+            },
+        }
+        and isinstance(backup_statement, dict)
+        and set(backup_statement) == {"Sid", "Effect", "Action", "Resource", "Condition"}
+        and backup_statement.get("Sid") == "BackupServiceLinkedRole"
+        and backup_statement.get("Effect") == "Allow"
+        and backup_statement.get("Action") == "iam:CreateServiceLinkedRole"
+        and _cloudformation_sub_equals(backup_statement.get("Resource"), backup_role_arn)
+        and backup_statement.get("Condition")
+        == {"StringEquals": {"iam:AWSServiceName": "backup.amazonaws.com"}},
+        "Platform CloudFormation may create only the exact approved service-linked roles.",
     )
 
 
@@ -694,6 +988,7 @@ def validate_azure_control_plane() -> None:
     ):
         require(required_fragment in bootstrap_template, f"AWS deployment least privilege lacks: {required_fragment}")
     validate_serverless_transform_execution_roles(bootstrap_template)
+    validate_platform_cloudformation_handler_contract(aws_template, bootstrap_template)
     require(
         "\n  CloudFormationExecutionRole:\n" not in bootstrap_template,
         "The obsolete shared CloudFormation execution role must not be restored.",

@@ -11,6 +11,29 @@ TRANSFORM_ARN = (
 )
 
 
+def platform_api_handler_template(
+    table_name: str = "loan-document-${EnvironmentName}-registry",
+    bucket_name: str = (
+        "loan-document-${EnvironmentName}-source-${AWS::AccountId}-${AWS::Region}"
+    ),
+) -> str:
+    return f"""Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedPattern: '[a-z0-9-]+'
+    MaxLength: 13
+Resources:
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '{bucket_name}'
+  RegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '{table_name}'
+"""
+
+
 def bootstrap_transform_template(
     *,
     platform_effect: str = "Allow",
@@ -47,7 +70,12 @@ def bootstrap_transform_template(
         if deny_platform_transform
         else ""
     )
-    return f"""Resources:
+    return f"""Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedPattern: '[a-z0-9-]+'
+    MaxLength: 13
+Resources:
   PlatformCloudFormationExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -55,6 +83,42 @@ def bootstrap_transform_template(
         - PolicyName: PlatformCloudFormation
           PolicyDocument:
             Statement:
+              - Sid: ExactPlatformResources
+                Effect: Allow
+                Action:
+                  - dynamodb:*
+                  - s3:*
+                Resource:
+                  - !Sub 'arn:${{AWS::Partition}}:dynamodb:${{AWS::Region}}:${{AWS::AccountId}}:table/loan-document-${{EnvironmentName}}-registry'
+                  - !Sub 'arn:${{AWS::Partition}}:dynamodb:${{AWS::Region}}:${{AWS::AccountId}}:table/loan-document-${{EnvironmentName}}-registry/*'
+                  - !Sub 'arn:${{AWS::Partition}}:s3:::loan-document-${{EnvironmentName}}-source-${{AWS::AccountId}}-${{AWS::Region}}'
+                  - !Sub 'arn:${{AWS::Partition}}:s3:::loan-document-${{EnvironmentName}}-source-${{AWS::AccountId}}-${{AWS::Region}}/*'
+              - Sid: PlatformBackupAndMalwarePlan
+                Effect: Allow
+                Action:
+                  - backup:*
+                  - guardduty:*
+                Resource: '*'
+              - Sid: MountEncryptedBackupVault
+                Effect: Allow
+                Action:
+                  - backup-storage:Mount
+                  - backup-storage:MountCapsule
+                Resource: '*'
+              - Sid: GuardDutyServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: guardduty.amazonaws.com
+              - Sid: BackupServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub 'arn:${{AWS::Partition}}:iam::${{AWS::AccountId}}:role/aws-service-role/backup.amazonaws.com/AWSServiceRoleForBackup'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: backup.amazonaws.com
               - Sid: ApplyAwsServerlessTransform
                 Effect: {platform_effect}
                 Action: {platform_action}
@@ -104,6 +168,266 @@ def test_serverless_transform_permission_is_scoped_to_each_execution_role() -> N
     validator = load_validator()
 
     validator.validate_serverless_transform_execution_roles(bootstrap_transform_template())
+
+
+def test_platform_cloudformation_handler_contract_is_exact() -> None:
+    validator = load_validator()
+
+    validator.validate_platform_cloudformation_handler_contract(
+        platform_api_handler_template(), bootstrap_transform_template()
+    )
+
+
+@pytest.mark.parametrize(
+    ("api_template", "bootstrap_template"),
+    [
+        (
+            platform_api_handler_template("generated-at-deploy"),
+            bootstrap_transform_template(),
+        ),
+        (
+            platform_api_handler_template(bucket_name="generated-at-deploy"),
+            bootstrap_transform_template(),
+        ),
+        (
+            platform_api_handler_template().replace("TableName: !Sub", "TableName:", 1),
+            bootstrap_transform_template(),
+        ),
+        (
+            platform_api_handler_template().replace("BucketName: !Sub", "BucketName:", 1),
+            bootstrap_transform_template(),
+        ),
+        (
+            platform_api_handler_template().replace("MaxLength: 13", "MaxLength: 64", 1),
+            bootstrap_transform_template(),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace("MaxLength: 13", "MaxLength: 64", 1),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "PlatformCloudFormationExecutionRole:\n    Type: AWS::IAM::Role",
+                "PlatformCloudFormationExecutionRole:\n    Type: AWS::IAM::Policy",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "loan-document-${EnvironmentName}-registry/*'",
+                "loan-document-${EnvironmentName}-other/*'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "loan-document-${EnvironmentName}-source-${AWS::AccountId}-${AWS::Region}/*'",
+                "loan-document-${EnvironmentName}-other-${AWS::AccountId}-${AWS::Region}/*'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "- Sid: ExactPlatformResources\n                Effect: Allow",
+                "- Sid: ExactPlatformResources\n                Effect: Deny",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "                  - !Sub 'arn:${AWS::Partition}:dynamodb:",
+                "                  - '*'\n"
+                "                  - !Sub 'arn:${AWS::Partition}:dynamodb:",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "              - Sid: PlatformBackupAndMalwarePlan",
+                "              - Sid: BroadS3Bypass\n"
+                "                Effect: Allow\n"
+                "                Action: s3:PutObject\n"
+                "                Resource: '*'\n"
+                "              - Sid: PlatformBackupAndMalwarePlan",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template()
+            + "  AttachedInlineBypass:\n"
+            "    Type: AWS::IAM::Policy\n"
+            "    Properties:\n"
+            "      Roles:\n"
+            "        - !Ref PlatformCloudFormationExecutionRole\n"
+            "      PolicyName: bypass\n"
+            "      PolicyDocument:\n"
+            "        Statement: []\n",
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template()
+            + "  AttachedManagedBypass:\n"
+            "    Type: AWS::IAM::ManagedPolicy\n"
+            "    Properties:\n"
+            "      Roles:\n"
+            "        - !Ref PlatformCloudFormationExecutionRole\n"
+            "      PolicyDocument:\n"
+            "        Statement: []\n",
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "backup-storage:Mount\n", "", 1
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "backup-storage:MountCapsule", "backup:CreateBackupVault", 1
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "backup-storage:Mount\n                  - backup-storage:MountCapsule",
+                "backup-storage:*",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "              - Sid: GuardDutyServiceLinkedRole",
+                "              - Sid: BroadBackupStorageBypass\n"
+                "                Effect: Allow\n"
+                "                Action: backup-storage:*\n"
+                "                Resource: '*'\n"
+                "              - Sid: GuardDutyServiceLinkedRole",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "backup-storage:MountCapsule\n                Resource: '*'",
+                "backup-storage:MountCapsule\n"
+                "                Resource: !Sub 'arn:${AWS::Partition}:backup:"
+                "${AWS::Region}:${AWS::AccountId}:backup-vault:*'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "backup-storage:MountCapsule\n                Resource: '*'",
+                "backup-storage:MountCapsule\n"
+                "                Resource: '*'\n"
+                "                Condition:\n"
+                "                  Bool:\n"
+                "                    aws:SecureTransport: true",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Properties:\n      Policies:",
+                "Properties:\n"
+                "      ManagedPolicyArns:\n"
+                "        - arn:aws:iam::aws:policy/AdministratorAccess\n"
+                "      Policies:",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/"
+                "aws-service-role/backup.amazonaws.com/AWSServiceRoleForBackup'",
+                "Resource: '*'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "iam:AWSServiceName: backup.amazonaws.com",
+                "iam:AWSServiceName: ec2.amazonaws.com",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Action: iam:CreateServiceLinkedRole\n                Resource: !Sub",
+                "Action: iam:*\n                Resource: !Sub",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "              - Sid: ApplyAwsServerlessTransform",
+                "              - Sid: BroadServiceLinkedRoleBypass\n"
+                "                Effect: Allow\n"
+                "                Action: iam:*\n"
+                "                Resource: '*'\n"
+                "              - Sid: ApplyAwsServerlessTransform",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "iam:AWSServiceName: backup.amazonaws.com",
+                "iam:AWSServiceName:\n"
+                "                      - backup.amazonaws.com\n"
+                "                      - ec2.amazonaws.com",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/"
+                "aws-service-role/backup.amazonaws.com/AWSServiceRoleForBackup'",
+                "Resource: 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/"
+                "aws-service-role/backup.amazonaws.com/AWSServiceRoleForBackup'",
+                1,
+            ),
+        ),
+        (
+            platform_api_handler_template(),
+            bootstrap_transform_template().replace(
+                "- Sid: BackupServiceLinkedRole\n                Effect: Allow",
+                "- Sid: BackupServiceLinkedRole\n                Effect: Deny",
+                1,
+            ),
+        ),
+    ],
+)
+def test_platform_cloudformation_handler_contract_rejects_mutations(
+    api_template: str, bootstrap_template: str
+) -> None:
+    validator = load_validator()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "handler|service-linked|deterministic|authorized|execution role|"
+            "inline role definitions"
+        ),
+    ):
+        validator.validate_platform_cloudformation_handler_contract(
+            api_template, bootstrap_template
+        )
 
 
 @pytest.mark.parametrize(
@@ -390,24 +714,25 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "Set-AwsStatefulStackPolicy"
         ),
         "infra/api/template.yaml": (
-            "EntraTenantOidcProvider:\n"
-            "AzureApiRuntimeRole:\n"
-            "RolePermissionsBoundaryArn:\n"
-            + ("PermissionsBoundary: !Ref RolePermissionsBoundaryArn\n" * 5)
-            + "sts:AssumeRoleWithWebIdentity\n"
-            "sts.windows.net/x/:aud\n"
-            "sts.windows.net/x/:sub\n"
-            "${SourceBucket.Arn}/quarantine/tenants/*\n"
-            "prefix: quarantine/tenants/\n"
-            "UploadCompletionStreamMapping:\n"
-            "Type: AWS::Lambda::EventSourceMapping\n"
-            "EventSourceArn: !GetAtt RegistryTable.StreamArn\n"
-            "dynamodb:GetRecords\n"
-            "BisectBatchOnFunctionError: true\n"
-            "StartingPosition: TRIM_HORIZON\n"
-            "Destination: !GetAtt UploadProcessorDlq.Arn\n"
-            "ReportBatchItemFailures\n"
-            "AWS::ApiGatewayV2::Api"
+            platform_api_handler_template()
+            + "# EntraTenantOidcProvider:\n"
+            "# AzureApiRuntimeRole:\n"
+            "# RolePermissionsBoundaryArn:\n"
+            + ("# PermissionsBoundary: !Ref RolePermissionsBoundaryArn\n" * 5)
+            + "# sts:AssumeRoleWithWebIdentity\n"
+            "# sts.windows.net/x/:aud\n"
+            "# sts.windows.net/x/:sub\n"
+            "# ${SourceBucket.Arn}/quarantine/tenants/*\n"
+            "# prefix: quarantine/tenants/\n"
+            "# UploadCompletionStreamMapping:\n"
+            "# Type: AWS::Lambda::EventSourceMapping\n"
+            "# EventSourceArn: !GetAtt RegistryTable.StreamArn\n"
+            "# dynamodb:GetRecords\n"
+            "# BisectBatchOnFunctionError: true\n"
+            "# StartingPosition: TRIM_HORIZON\n"
+            "# Destination: !GetAtt UploadProcessorDlq.Arn\n"
+            "# ReportBatchItemFailures\n"
+            "# AWS::ApiGatewayV2::Api"
         ),
         "infra/bootstrap/template.yaml": (
             bootstrap_transform_template()

@@ -189,6 +189,17 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 11: AWS CloudFormation Handler Contract
+
+**Purpose**: Keep create-time AWS resource identities and permission-only handler dependencies aligned with least-privilege bootstrap IAM.
+
+- [x] T060 [P] [US4] Add deterministic registry/source-name, exact Backup mount-action, and service-linked-role permission mutations in `tests/test_repository_validator.py`
+- [x] T061 [US4] Set the authorized registry table and source bucket names in `infra/api/template.yaml`, then grant only the active Backup handler actions and exact Backup service-linked-role creation in `infra/bootstrap/template.yaml`
+- [x] T062 [US4] Parse and enforce the complete cross-template CloudFormation handler contract in `scripts/validate-repository.py`
+- [x] T063 [US4] Reject global DynamoDB/S3 resource grants and standalone role-policy attachments, and preserve the stateful replacement gate for pre-existing generated resources
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

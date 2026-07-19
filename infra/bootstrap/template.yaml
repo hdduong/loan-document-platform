@@ -19,6 +19,7 @@ Parameters:
     Type: String
     Default: prod
     AllowedPattern: '[a-z0-9-]+'
+    MaxLength: 13
   PlatformStackName:
     Type: String
     AllowedPattern: '[A-Za-z][-A-Za-z0-9]*'
@@ -291,6 +292,13 @@ Resources:
                   - backup:*
                   - guardduty:*
                 Resource: '*'
+              - Sid: MountEncryptedBackupVault
+                Effect: Allow
+                Action:
+                  # Required by the active AWS::Backup::BackupVault create-handler schema.
+                  - backup-storage:Mount
+                  - backup-storage:MountCapsule
+                Resource: '*'
               - Sid: ExactCostBudget
                 Effect: Allow
                 Action: budgets:*
@@ -385,6 +393,13 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:AWSServiceName: guardduty.amazonaws.com
+              - Sid: BackupServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/backup.amazonaws.com/AWSServiceRoleForBackup'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: backup.amazonaws.com
       Tags:
         - Key: Application
           Value: loan-document-platform
