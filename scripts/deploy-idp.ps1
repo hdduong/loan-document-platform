@@ -33,7 +33,7 @@ if ([string]$lock.cliPythonVersion -cne '3.12') {
     throw 'The reviewed IDP 0.5.16 CLI dependency set requires Python 3.12.'
 }
 
-foreach ($command in 'aws', 'git', 'python', 'sam', 'docker', 'node', 'npm') {
+foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm') {
     Assert-Command -Name $command -InstallHint "Install '$command' before building the pinned IDP source."
 }
 $idpPython = Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)

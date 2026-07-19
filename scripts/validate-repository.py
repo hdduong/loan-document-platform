@@ -1071,6 +1071,7 @@ def validate_idp_python_toolchain_contract(
     )
     for fragment in (
         "Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)",
+        "foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm')",
         '".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"',
         "lib/idp_common_pkg')[all]",
         "'-m', 'pip', 'check'",
@@ -1078,6 +1079,10 @@ def validate_idp_python_toolchain_contract(
         "Invoke-WithPrependedPath -Path $venvExecutableDirectory -ScriptBlock",
     ):
         require(fragment in deploy_script, f"Pinned IDP Python gate lacks: {fragment}")
+    require(
+        "foreach ($command in 'aws', 'git', 'python'," not in deploy_script,
+        "IDP deployment must not require generic Python before exact-minor resolution.",
+    )
     for fragment in (
         "Python.Python.3.13",
         "Python.Python.3.12",

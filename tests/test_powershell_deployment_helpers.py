@@ -172,6 +172,8 @@ def test_idp_cli_toolchain_keeps_python_runtimes_split() -> None:
     )
 
     assert lock["cliPythonVersion"] == "3.12"
+    assert "foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm')" in deploy
+    assert "foreach ($command in 'aws', 'git', 'python'," not in deploy
     assert '.local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag' in deploy
     assert "lib/idp_common_pkg')[all]" in deploy
     assert "Invoke-WithPrependedPath" in deploy

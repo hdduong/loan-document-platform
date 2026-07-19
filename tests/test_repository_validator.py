@@ -1095,6 +1095,7 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "idp-cli deploy --headless IdpCloudFormationExecutionRoleArn "
             "IdpRolePermissionsBoundaryArn PermissionsBoundaryArn= Set-AwsStatefulStackPolicy "
             "Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion) "
+            "foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm') "
             '".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag" '
             "lib/idp_common_pkg')[all] '-m', 'pip', 'check' "
             'm.version("numpy") == "1.26.4" '
