@@ -1032,6 +1032,70 @@ def validate_platform_packaging_contract(script_text: str) -> None:
         )
 
 
+def _setup_python_versions(workflow_text: str, workflow_name: str) -> list[str]:
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    require(isinstance(workflow, dict), f"Invalid GitHub workflow: {workflow_name}")
+    jobs = workflow.get("jobs")
+    require(isinstance(jobs, dict), f"GitHub workflow jobs must be a mapping: {workflow_name}")
+    versions: list[str] = []
+    for job in jobs.values():
+        require(isinstance(job, dict), f"GitHub workflow job must be a mapping: {workflow_name}")
+        steps = job.get("steps", [])
+        require(isinstance(steps, list), f"GitHub workflow steps must be a list: {workflow_name}")
+        for step in steps:
+            if not isinstance(step, dict) or not str(step.get("uses", "")).startswith(
+                "actions/setup-python@"
+            ):
+                continue
+            configuration = step.get("with")
+            require(
+                isinstance(configuration, dict) and isinstance(configuration.get("python-version"), str),
+                f"setup-python must declare python-version: {workflow_name}",
+            )
+            versions.append(configuration["python-version"])
+    return versions
+
+
+def validate_idp_python_toolchain_contract(
+    lock: dict[str, Any],
+    deploy_script: str,
+    bootstrap_script: str,
+    production_workflow: str,
+    validation_workflow: str,
+) -> None:
+    """Keep the pinned IDP CLI on its supported minor without moving platform code."""
+
+    require(
+        lock.get("cliPythonVersion") == "3.12",
+        "Pinned IDP 0.5.16 CLI must use Python 3.12.",
+    )
+    for fragment in (
+        "Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)",
+        '".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"',
+        "lib/idp_common_pkg')[all]",
+        "'-m', 'pip', 'check'",
+        'm.version(\"numpy\") == \"1.26.4\"',
+        "Invoke-WithPrependedPath -Path $venvExecutableDirectory -ScriptBlock",
+    ):
+        require(fragment in deploy_script, f"Pinned IDP Python gate lacks: {fragment}")
+    for fragment in (
+        "Python.Python.3.13",
+        "Python.Python.3.12",
+        "Resolve-PythonLaunch -Version $requiredIdpPythonVersion",
+        "--source', 'winget'",
+        "--source winget",
+    ):
+        require(fragment in bootstrap_script, f"Bootstrap Python split lacks: {fragment}")
+    require(
+        _setup_python_versions(production_workflow, "deploy-prod.yml") == ["3.12", "3.13"],
+        "Production must set up IDP Python 3.12 before restoring platform Python 3.13.",
+    )
+    require(
+        _setup_python_versions(validation_workflow, "validate.yml") == ["3.13"],
+        "Pull-request validation must remain on platform Python 3.13 only.",
+    )
+
+
 def validate_workflow_actions(value: Any, path: Path) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -1319,6 +1383,13 @@ def validate_azure_control_plane() -> None:
     require(lock.get("deploymentMode") == "headless", "The pinned IDP deployment must remain headless.")
     idp_deploy = (ROOT / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
     require("--headless" in idp_deploy, "The IDP deployment script must enforce --headless.")
+    validate_idp_python_toolchain_contract(
+        lock,
+        idp_deploy,
+        (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8"),
+        (ROOT / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8"),
+        (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8"),
+    )
 
     aws_template = (ROOT / "infra" / "api" / "template.yaml").read_text(encoding="utf-8")
     for prohibited in (

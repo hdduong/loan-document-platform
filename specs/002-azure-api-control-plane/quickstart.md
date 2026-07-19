@@ -6,7 +6,8 @@ The commands below must be run from the repository root. Never paste a bearer to
 
 ## Prerequisites
 
-- PowerShell 7, Git, Python 3.13, and the repository virtual environment
+- PowerShell 7, Git, Python 3.13 for repository/platform work, Python 3.12 for
+  the pinned IDP CLI, and the repository virtual environment
 - Azure CLI with Bicep support and access to the intended subscription and Entra tenant
 - AWS CLI v2, AWS SAM CLI, and an IAM Identity Center profile for the intended account
 - Docker for building the Azure API container and the pinned IDP source
@@ -195,6 +196,14 @@ It must enforce this order:
 9. Publish the SPA/runtime configuration after the Azure API hostname is healthy.
 
 Use the individual scripts only to resume a failed phase. `scripts/provision-entra.ps1`, `scripts/deploy-azure.ps1`, `scripts/deploy-platform.ps1`, and `scripts/deploy-idp.ps1` are idempotent, but manually changing their order can create an untrusted workload or an IDP stack with incomplete hook/bucket permissions. A direct first-install platform pass must explicitly use `deploy-platform.ps1 -AllowMissingIdp`; every reuse, `-SkipIdp`, and post-IDP pass must omit that switch so missing outputs or lookup failures stop deployment and the deployed IDP wiring is verified.
+
+`vendor/idp.lock.json` also pins the IDP CLI minor runtime to Python 3.12.
+`scripts/bootstrap.ps1 -InstallMissing` installs that interpreter alongside the
+platform's Python 3.13 on Windows. `scripts/deploy-idp.ps1` creates a versioned
+`py312` virtual environment, verifies the upstream `[all]` dependency set and
+NumPy 1.26.4, and temporarily exposes that environment to child SAM builds. Do
+not remove `[all]`, relax NumPy, or install a compiler to force the pinned release
+onto Python 3.13.
 
 To resume only the Entra phase on Windows, use a single PowerShell 7 command; an MSI `az.cmd` entrypoint reported by `Get-Command az` is supported by the shared launcher:
 

@@ -232,6 +232,16 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 15: Pinned IDP Python Runtime
+
+**Purpose**: Keep IDP 0.5.16 on the Python minor supported by its reviewed NumPy pin without moving platform code off Python 3.13.
+
+- [x] T075 [P] [US4] Add exact-minor resolver, path-restoration, stale-cache, workflow-order, and validator mutation regressions in `tests/test_powershell_deployment_helpers.py` and `tests/test_repository_validator.py`
+- [x] T076 [US4] Pin `cliPythonVersion` in `vendor/idp.lock.json`, provision it in `scripts/bootstrap.ps1`, isolate and verify it in `scripts/deploy-idp.ps1`, and retain Python 3.13 as the platform/validation default in GitHub Actions
+- [x] T077 [US4] Record the split Python runtime and supported recovery procedure in the active Spec Kit artifacts, README, and deployment runbook
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

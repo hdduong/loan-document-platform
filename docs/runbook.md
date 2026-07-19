@@ -18,8 +18,9 @@
 - IAM Identity Center AWS CLI profile with MFA. Do not create an access key.
 - Azure CLI login using the intended tenant/subscription. Do not create a client
   secret or download a publish profile.
-- PowerShell 7, Git, Python 3.13, Node 22, AWS CLI v2, AWS SAM CLI, Azure CLI with
-  Bicep, Docker, and WSL/Ubuntu for upstream IDP tooling.
+- PowerShell 7, Git, Python 3.13 for platform validation, a separate Python 3.12
+  interpreter for the pinned IDP CLI, Node 22, AWS CLI v2, AWS SAM CLI, Azure
+  CLI with Bicep, Docker, and WSL/Ubuntu for upstream IDP tooling.
 - Corporate TLS root CA configured for Azure/AWS/Graph/GitHub tooling when a
   proxy intercepts TLS. Never disable certificate validation.
 
@@ -88,8 +89,10 @@ allowlisted, and `iam:PassRole` is limited to approved service principals.
    S3/KMS, GuardDuty, processors, queues, backups, and alarms but does not deploy
    API Gateway or a Loan API Lambda.
 9. Run `scripts/deploy-idp.ps1` to deploy the pinned `--headless` IDP stack and
-   upload/activate `cd-screen-v1` and `cd-full-v1`. AppSync and Jobs REST are not
-   enabled.
+   upload/activate `cd-screen-v1` and `cd-full-v1`. The script creates an
+   ABI-qualified Python 3.12 virtual environment because IDP 0.5.16 pins NumPy
+   1.26.4; it rejects Python 3.13 rather than compiling or changing that upstream
+   dependency. AppSync and Jobs REST are not enabled.
 10. Re-run `scripts/deploy-platform.ps1` without `-AllowMissingIdp`. This pass is
     required: it binds processor environment/IAM values to the deployed IDP
     buckets, KMS key, and state machine, then verifies the stored CloudFormation

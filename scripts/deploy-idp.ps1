@@ -29,10 +29,14 @@ if ($lock.version -ne $config.idpVersion -or $lock.commit -ne $config.idpCommit)
     throw 'Environment IDP version/commit does not match vendor/idp.lock.json.'
 }
 if ($lock.deploymentMode -ne 'headless') { throw 'The committed IDP lock must specify headless deployment mode.' }
+if ([string]$lock.cliPythonVersion -cne '3.12') {
+    throw 'The reviewed IDP 0.5.16 CLI dependency set requires Python 3.12.'
+}
 
 foreach ($command in 'aws', 'git', 'python', 'sam', 'docker', 'node', 'npm') {
     Assert-Command -Name $command -InstallHint "Install '$command' before building the pinned IDP source."
 }
+$idpPython = Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)
 Assert-AwsIdentity -Profile $config.awsProfile -Region $config.awsRegion -ExpectedAccountId $config.awsAccountId | Out-Null
 
 $bootstrap = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.bootstrapStackName
@@ -95,18 +99,35 @@ if ($sourceCommit -ne $lock.commit) { throw "Checked-out IDP commit '$sourceComm
 & git -C $vendorDirectory diff --quiet --exit-code
 if ($LASTEXITCODE -ne 0) { throw 'Pinned IDP source has tracked local modifications; refusing a production build.' }
 
-$venvDirectory = Join-Path $root ".local/tools/idp-cli-$($lock.version)"
+$pythonRuntimeTag = ([string]$lock.cliPythonVersion).Replace('.', '')
+$venvDirectory = Join-Path $root ".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"
 $pythonExecutable = if ($IsWindows) {
     Join-Path $venvDirectory 'Scripts/python.exe'
 } else {
     Join-Path $venvDirectory 'bin/python'
 }
-$installMarker = Join-Path $venvDirectory ".installed-$($lock.commit)"
-if ($ReinstallCli -or -not (Test-Path -LiteralPath $installMarker)) {
+$installMarker = Join-Path $venvDirectory ".installed-$($lock.commit)-py$pythonRuntimeTag"
+$installRequired = $ReinstallCli -or
+    -not (Test-Path -LiteralPath $installMarker -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $pythonExecutable -PathType Leaf)
+if ($installRequired) {
+    if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
+        [IO.File]::Delete($installMarker)
+    }
     if (-not (Test-Path -LiteralPath $pythonExecutable)) {
         [IO.Directory]::CreateDirectory((Split-Path $venvDirectory)) | Out-Null
-        Invoke-Checked -Command python -Arguments @('-m', 'venv', $venvDirectory) -FailureMessage 'Failed to create the pinned IDP CLI virtual environment.'
+        Invoke-Checked `
+            -Command $idpPython.FilePath `
+            -Arguments (@($idpPython.PrefixArguments) + @('-m', 'venv', $venvDirectory)) `
+            -FailureMessage 'Failed to create the pinned Python 3.12 IDP CLI virtual environment.'
     }
+}
+$venvProbe = 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+$venvVersion = (& $pythonExecutable -c $venvProbe 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $venvVersion -cne [string]$lock.cliPythonVersion) {
+    throw "Pinned IDP CLI environment must use Python $($lock.cliPythonVersion); remove only the local cache '$venvDirectory' and rerun."
+}
+if ($installRequired) {
     Invoke-Checked -Command $pythonExecutable -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip') -FailureMessage 'Failed to update pip in the IDP virtual environment.'
     Invoke-Checked -Command $pythonExecutable -Arguments @(
         '-m', 'pip', 'install',
@@ -115,10 +136,17 @@ if ($ReinstallCli -or -not (Test-Path -LiteralPath $installMarker)) {
         '-e', (Join-Path $vendorDirectory 'lib/idp_cli_pkg'),
         'cfn-lint'
     ) -FailureMessage 'Failed to install the pinned IDP CLI and build dependencies.'
+}
+Invoke-Checked -Command $pythonExecutable -Arguments @('-m', 'pip', 'check') -FailureMessage 'Pinned IDP CLI dependencies are inconsistent.'
+$dependencySmoke = 'import importlib.metadata as m; import idp_common, idp_sdk, idp_cli; assert m.version("numpy") == "1.26.4"'
+Invoke-Checked -Command $pythonExecutable -Arguments @('-c', $dependencySmoke) -FailureMessage 'Pinned IDP CLI dependency smoke test failed.'
+if ($installRequired) {
     [IO.File]::WriteAllText($installMarker, $lock.commit + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 }
 
-Invoke-Checked -Command docker -Arguments @('info') -FailureMessage 'Docker is required and must be running for a pinned source IDP build.'
+$venvExecutableDirectory = Split-Path -Parent $pythonExecutable
+Invoke-WithPrependedPath -Path $venvExecutableDirectory -ScriptBlock {
+    Invoke-Checked -Command docker -Arguments @('info') -FailureMessage 'Docker is required and must be running for a pinned source IDP build.'
 $cliPrefix = @('-m', 'idp_cli.cli')
 if ($env:GITHUB_ACTIONS -ne 'true') { $cliPrefix += @('--profile', $config.awsProfile) }
 $deployArguments = $cliPrefix + @(
@@ -179,6 +207,7 @@ $activateArguments = $cliPrefix + @(
     '--config-version', [string]$manifest.screen.name
 )
 Invoke-Checked -Command $pythonExecutable -Arguments $activateArguments -FailureMessage 'Failed to activate the inexpensive screening configuration as the safe IDP default.'
+}
 
 $outputs = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.idpStackName
 $working = Invoke-Aws -Profile $config.awsProfile -Region $config.awsRegion -Arguments @(

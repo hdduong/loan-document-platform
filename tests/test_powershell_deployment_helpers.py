@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -98,6 +99,87 @@ def test_idp_scripts_share_the_normalized_digest_helper() -> None:
     assert "Get-FileHash -Algorithm SHA256 -LiteralPath $entry.Path" not in deploy
     assert module_import in generator
     assert "function Get-NormalizedTextSha256" not in generator
+
+
+def test_python_launch_resolver_requires_the_exact_minor() -> None:
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    expected = f"{sys.version_info.major}.{sys.version_info.minor}"
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        f"$launch = Resolve-PythonLaunch -Version '{expected}'; "
+        "$launch | ConvertTo-Json -Depth 5 -Compress"
+    )
+
+    launch = json.loads(run_powershell(script, environment=os.environ.copy()))
+
+    assert launch["Version"] == expected
+    assert launch["FilePath"]
+    assert isinstance(launch["PrefixArguments"], list)
+
+
+def test_python_launch_resolver_fails_closed_for_a_missing_minor() -> None:
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$missing = Resolve-PythonLaunch -Version '99.99' -AllowMissing; "
+        "$message = ''; "
+        "try { Resolve-PythonLaunch -Version '99.99' | Out-Null } "
+        "catch { $message = $_.Exception.Message }; "
+        "$result = [pscustomobject]@{ Missing = ($null -eq $missing); Message = $message }; "
+        "$result | ConvertTo-Json -Compress"
+    )
+
+    result = json.loads(run_powershell(script, environment=os.environ.copy()))
+
+    assert result["Missing"] is True
+    assert "Python 99.99 is required for the pinned IDP CLI" in result["Message"]
+
+
+@pytest.mark.parametrize("raise_inside", [False, True])
+def test_prepend_path_helper_restores_process_path(tmp_path: Path, raise_inside: bool) -> None:
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    prepend_path = str(tmp_path).replace("'", "''")
+    should_raise = "$true" if raise_inside else "$false"
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$before = $env:PATH; $global:IDP_TEST_INSIDE = ''; $caught = $false; "
+        "try { Invoke-WithPrependedPath "
+        f"-Path '{prepend_path}' -ScriptBlock {{ "
+        "$global:IDP_TEST_INSIDE = ($env:PATH -split [IO.Path]::PathSeparator)[0]; "
+        f"if ({should_raise}) {{ throw 'expected' }} }} }} "
+        "catch { if ($_.Exception.Message -eq 'expected') { $caught = $true } else { throw } }; "
+        "$result = [pscustomobject]@{ Before = $before; After = $env:PATH; "
+        "Inside = $global:IDP_TEST_INSIDE; Caught = $caught }; "
+        "$result | ConvertTo-Json -Compress"
+    )
+
+    result = json.loads(run_powershell(script, environment=os.environ.copy()))
+
+    assert result["Before"] == result["After"]
+    assert Path(result["Inside"]) == tmp_path
+    assert result["Caught"] is raise_inside
+
+
+def test_idp_cli_toolchain_keeps_python_runtimes_split() -> None:
+    lock = json.loads((ROOT / "vendor" / "idp.lock.json").read_text(encoding="utf-8"))
+    deploy = (ROOT / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")
+    production = (ROOT / ".github" / "workflows" / "deploy-prod.yml").read_text(
+        encoding="utf-8"
+    )
+    validation = (ROOT / ".github" / "workflows" / "validate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert lock["cliPythonVersion"] == "3.12"
+    assert '.local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag' in deploy
+    assert "lib/idp_common_pkg')[all]" in deploy
+    assert "Invoke-WithPrependedPath" in deploy
+    assert "Python.Python.3.12" in bootstrap
+    assert production.index("python-version: '3.12'") < production.index(
+        "python-version: '3.13'"
+    )
+    assert "python-version: '3.12'" not in validation
 
 
 def classify_stack_lookup_error(error_text: str) -> bool:

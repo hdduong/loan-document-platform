@@ -12,7 +12,7 @@ The migration deliberately keeps one registry in DynamoDB. Moving the API runtim
 
 ## Technical Context
 
-**Language/Version**: Python 3.13 for the Azure API and retained AWS processors; PowerShell 7 for provisioning; Bicep for Azure and SAM/CloudFormation for AWS
+**Language/Version**: Python 3.13 for the Azure API, retained AWS processors, and repository validation; Python 3.12 for the pinned IDP 0.5.16 CLI/build environment; PowerShell 7 for provisioning; Bicep for Azure and SAM/CloudFormation for AWS
 
 **Primary Dependencies**: FastAPI, Uvicorn, PyJWT with `cryptography`, Azure Identity, boto3/botocore, Pydantic settings; existing PDF/IDP processor dependencies remain pinned
 
@@ -103,6 +103,16 @@ Packaged Lambda code remains in the bootstrap artifact bucket, not the retained 
 Lambda validates event-source filter strings only when it creates or updates the mapping, after SAM and CloudFormation static template checks have passed. Repository validation therefore parses every declared mapping filter as JSON with duplicate-key rejection before packaging. It also compares the upload-completion filter structurally to the reviewed contract: DynamoDB `INSERT` or `MODIFY`, new-image `entityType=UPLOAD`, and new-image `status=VALIDATING`. Delimiter errors, non-object patterns, duplicate keys, extra filters, and semantic broadening fail locally and in pull-request validation.
 
 IDP configuration digests identify reviewed text rather than a workstation's checkout convention. One exported PowerShell helper decodes strict UTF-8, normalizes CRLF and bare CR to LF, re-encodes without adding a byte-order mark, and computes SHA-256. An existing UTF-8 byte-order mark remains significant content, as do whitespace, final newline, and Unicode composition; only line endings are normalized. The configuration generator and deployment preflight use that helper, matching the Python repository validator's algorithm exactly. This preserves one manifest identity across Windows and Linux while still rejecting invalid encoding or any content change before an IDP build or upload.
+
+The IDP CLI has a separate minor-runtime contract from platform code. Release
+0.5.16 permits Python 3.12 or 3.13 at package metadata level but its reviewed
+`[all]` set pins NumPy 1.26.4, which provides the required binary wheel for
+Python 3.12 and not Python 3.13. The lock therefore pins CLI Python 3.12, the
+bootstrap installs both minors, and deployment uses an ABI-qualified virtual
+environment with dependency and import checks. Production Actions installs
+3.12 first and restores 3.13 as the default, while the IDP virtual environment
+is temporarily prepended for child SAM builds. The source tree and dependency
+pins remain unchanged.
 
 ## Project Structure
 

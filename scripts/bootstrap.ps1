@@ -8,6 +8,12 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'common.psm1') -Force
 $requiredTrivyVersion = '0.72.0'
+$idpLock = Get-Content -Raw -LiteralPath (Join-Path (Get-ProjectRoot) 'vendor/idp.lock.json') |
+    ConvertFrom-Json -Depth 10
+$requiredIdpPythonVersion = [string]$idpLock.cliPythonVersion
+if ($requiredIdpPythonVersion -cne '3.12') {
+    throw 'The reviewed IDP 0.5.16 toolchain requires cliPythonVersion 3.12.'
+}
 
 $commands = @(
     @{ Name = 'git'; Package = 'Git.Git'; Hint = 'Install Git for Windows.' },
@@ -28,11 +34,30 @@ foreach ($command in $commands) {
         if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
             throw "winget is unavailable; install '$($command.Name)' manually."
         }
-        $wingetArguments = @('install', '--id', $command.Package, '--exact', '--accept-package-agreements', '--accept-source-agreements')
+        $wingetArguments = @(
+            'install', '--id', $command.Package, '--exact', '--source', 'winget',
+            '--accept-package-agreements', '--accept-source-agreements'
+        )
         if ($command.ContainsKey('Version')) { $wingetArguments += @('--version', $command.Version) }
         & winget @wingetArguments
         if ($LASTEXITCODE -ne 0) { throw "Failed to install $($command.Package)." }
     }
+}
+
+$idpPython = Resolve-PythonLaunch -Version $requiredIdpPythonVersion -AllowMissing
+if ($null -eq $idpPython) {
+    if (-not $InstallMissing) {
+        throw "Missing Python $requiredIdpPythonVersion for the pinned IDP CLI. Re-run with -InstallMissing to use winget on Windows."
+    }
+    if (-not $IsWindows) {
+        throw "Install Python $requiredIdpPythonVersion with the operating system package manager, then rerun bootstrap."
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget is unavailable; install Python $requiredIdpPythonVersion manually."
+    }
+    & winget install --id Python.Python.3.12 --exact --source winget --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to install Python.Python.3.12.' }
+    $idpPython = Resolve-PythonLaunch -Version $requiredIdpPythonVersion
 }
 
 $trivyVersion = (& trivy --version | Select-Object -First 1 | Out-String).Trim()
@@ -42,7 +67,7 @@ if ($trivyVersion -ne "Version: $requiredTrivyVersion") {
 
 $pythonVersion = & python --version
 $nodeVersion = & node --version
-Write-Host "Toolchain installed: $pythonVersion; Node $nodeVersion"
+Write-Host "Toolchain installed: $pythonVersion; IDP CLI Python $($idpPython.Version); Node $nodeVersion"
 
 if ([string]::IsNullOrWhiteSpace($EnvironmentFile)) {
     Write-Host 'No environment file supplied; cloud identity and tenant checks were skipped.'
@@ -77,5 +102,5 @@ if ($azAccount.id -ne $config.azureSubscriptionId) {
 & az bicep build --file (Join-Path (Get-ProjectRoot) 'infra/azure/main.bicep') --stdout | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Azure Bicep compilation failed.' }
 
-Write-Host "Toolchain ready: $pythonVersion; Node $nodeVersion"
+Write-Host "Toolchain ready: $pythonVersion; IDP CLI Python $($idpPython.Version); Node $nodeVersion"
 Write-Host 'No certificate validation was disabled and no cloud credential was written.'

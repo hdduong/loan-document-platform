@@ -144,6 +144,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **FR-036**: Platform document-data keys MUST carry `KeyPurpose=document-data`, bootstrap artifact keys MUST carry `KeyPurpose=deployment-artifacts`, and every create/manage document-key grant MUST require the corresponding purpose tag so `kms:*` document lifecycle access cannot match the artifact key.
 - **FR-037**: Every Lambda event-source filter in the platform template MUST be a literal, syntactically valid JSON object with unique keys before packaging; the upload-completion mapping MUST match only DynamoDB `INSERT` or `MODIFY` records whose new image is an `UPLOAD` in `VALIDATING` status.
 - **FR-038**: IDP configuration generation, repository validation, and deployment preflight MUST verify manifest SHA-256 values using the same strict UTF-8, LF-normalized text bytes; raw checkout line endings MUST NOT change the reviewed identity, and invalid UTF-8 MUST fail before build or upload.
+- **FR-039**: The pinned IDP 0.5.16 CLI and source-build tooling MUST use an exact Python 3.12 virtual environment while platform code and validation remain on Python 3.13; deployment MUST retain the reviewed `[all]` dependencies, verify NumPy 1.26.4 and dependency consistency, reject stale or wrong-minor environments, and restore the process path after child builds.
 
 ### Key Entities
 
@@ -183,6 +184,7 @@ An operator provisions and deploys the Azure API, its managed workload identity,
 - **SC-022**: Repository validation proves that SAM packaging uses exactly the bootstrap artifact bucket, `platform/${environment}` prefix, and bootstrap artifact key expected by the execution-role policy.
 - **SC-023**: Structured filter tests reject malformed delimiters, duplicate JSON keys, non-object patterns, and semantic drift from the exact upload-completion DynamoDB event contract before CloudFormation deployment.
 - **SC-024**: PowerShell helper tests prove LF, CRLF, and CR encodings of identical reviewed text produce one manifest digest, invalid UTF-8 is rejected, and both IDP generation and deployment use the shared normalized-digest helper.
+- **SC-025**: Repository and PowerShell-helper tests prove exact-minor Python resolution fails closed, the IDP cache is ABI-qualified, production installs Python 3.12 before restoring Python 3.13, pull-request validation remains on 3.13, and temporary path changes are restored after both successful and failed child operations.
 
 ## Assumptions
 

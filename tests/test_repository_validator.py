@@ -1038,16 +1038,72 @@ def test_active_feature_path_can_change_within_specs(tmp_path: Path, monkeypatch
     assert resolved.is_relative_to((repository / "specs").resolve())
 
 
+def test_idp_python_toolchain_contract_rejects_runtime_drift() -> None:
+    validator = load_validator()
+    repository = Path(__file__).resolve().parents[1]
+    lock = validator.load_json(repository / "vendor" / "idp.lock.json")
+    deploy = (repository / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
+    bootstrap = (repository / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")
+    production = (repository / ".github" / "workflows" / "deploy-prod.yml").read_text(
+        encoding="utf-8"
+    )
+    validation = (repository / ".github" / "workflows" / "validate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    validator.validate_idp_python_toolchain_contract(
+        lock, deploy, bootstrap, production, validation
+    )
+
+    with pytest.raises(ValueError, match="must use Python 3.12"):
+        validator.validate_idp_python_toolchain_contract(
+            {**lock, "cliPythonVersion": "3.13"},
+            deploy,
+            bootstrap,
+            production,
+            validation,
+        )
+
+    with pytest.raises(ValueError, match="Pinned IDP Python gate lacks"):
+        validator.validate_idp_python_toolchain_contract(
+            lock,
+            deploy.replace("lib/idp_common_pkg')[all]", "lib/idp_common_pkg')"),
+            bootstrap,
+            production,
+            validation,
+        )
+
+    reordered = production.replace("python-version: '3.12'", "python-version: 'TEMP'")
+    reordered = reordered.replace("python-version: '3.13'", "python-version: '3.12'")
+    reordered = reordered.replace("python-version: 'TEMP'", "python-version: '3.13'")
+    with pytest.raises(ValueError, match="before restoring platform Python 3.13"):
+        validator.validate_idp_python_toolchain_contract(
+            lock, deploy, bootstrap, reordered, validation
+        )
+
+
 def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypatch) -> None:
     validator = load_validator()
     repository = tmp_path / "repository"
     files = {
         ".dockerignore": "**/.env\n**/*.pem\n**/*.key\n**/*.pfx\n**/*.pdf\n",
         ".specify/feature.json": '{"feature_directory":"specs/002-azure-api-control-plane"}',
-        "vendor/idp.lock.json": '{"deploymentMode":"headless"}',
+        "vendor/idp.lock.json": (
+            '{"deploymentMode":"headless","cliPythonVersion":"3.12"}'
+        ),
         "scripts/deploy-idp.ps1": (
             "idp-cli deploy --headless IdpCloudFormationExecutionRoleArn "
-            "IdpRolePermissionsBoundaryArn PermissionsBoundaryArn= Set-AwsStatefulStackPolicy"
+            "IdpRolePermissionsBoundaryArn PermissionsBoundaryArn= Set-AwsStatefulStackPolicy "
+            "Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion) "
+            '".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag" '
+            "lib/idp_common_pkg')[all] '-m', 'pip', 'check' "
+            'm.version("numpy") == "1.26.4" '
+            "Invoke-WithPrependedPath -Path $venvExecutableDirectory -ScriptBlock"
+        ),
+        "scripts/bootstrap.ps1": (
+            "Python.Python.3.13 Python.Python.3.12 "
+            "Resolve-PythonLaunch -Version $requiredIdpPythonVersion "
+            "--source', 'winget' --source winget"
         ),
             "scripts/deploy-platform.ps1": (
                 "PlatformCloudFormationExecutionRoleArn PlatformRolePermissionsBoundaryArn "
@@ -1162,12 +1218,24 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
         ),
         "scripts/provision-entra-federation.ps1": "# provision",
         ".github/workflows/deploy-prod.yml": (
-            "run: ./scripts/install-trivy.ps1\n"
+            "jobs:\n"
+            "  deploy:\n"
+            "    steps:\n"
+            "      - uses: actions/setup-python@pinned\n"
+            "        with:\n"
+            "          python-version: '3.12'\n"
+            "      - uses: actions/setup-python@pinned\n"
+            "        with:\n"
+            "          python-version: '3.13'\n"
+            "      - run: ./scripts/install-trivy.ps1\n"
         ),
         ".github/workflows/validate.yml": (
             "jobs:\n"
             "  validate:\n"
             "    steps:\n"
+            "      - uses: actions/setup-python@pinned\n"
+            "        with:\n"
+            "          python-version: '3.13'\n"
             "      - name: Build image\n"
             "        env:\n"
             "          DOCKER_BUILDKIT: '1'\n"

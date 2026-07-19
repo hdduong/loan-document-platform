@@ -143,6 +143,72 @@ function Assert-Command {
     }
 }
 
+function Resolve-PythonLaunch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^\d+\.\d+$')]
+        [string]$Version,
+        [switch]$AllowMissing
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    if ($IsWindows) {
+        $launcher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $launcher) {
+            $candidates.Add([pscustomobject]@{
+                FilePath = $launcher.Source
+                PrefixArguments = @("-$Version")
+            })
+        }
+    }
+
+    foreach ($commandName in @("python$Version", 'python')) {
+        $command = Get-Command $commandName -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $command) {
+            $candidates.Add([pscustomobject]@{
+                FilePath = $command.Source
+                PrefixArguments = @()
+            })
+        }
+    }
+
+    $probe = 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+    foreach ($candidate in $candidates) {
+        $probeArguments = @($candidate.PrefixArguments) + @('-c', $probe)
+        $actual = (& $candidate.FilePath @probeArguments 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $actual -ceq $Version) {
+            return [pscustomobject]@{
+                FilePath = $candidate.FilePath
+                PrefixArguments = @($candidate.PrefixArguments)
+                Version = $actual
+            }
+        }
+    }
+
+    if ($AllowMissing) { return $null }
+    throw "Python $Version is required for the pinned IDP CLI. Install that exact minor version without replacing the platform's Python 3.13 runtime."
+}
+
+function Invoke-WithPrependedPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock
+    )
+
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $originalPath = $env:PATH
+    try {
+        $env:PATH = "$resolved$([IO.Path]::PathSeparator)$originalPath"
+        & $ScriptBlock
+    } finally {
+        $env:PATH = $originalPath
+    }
+}
+
 function Resolve-AzureCliLaunch {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$CommandSource)
@@ -467,4 +533,4 @@ function Get-StackOutputs {
     return $result
 }
 
-Export-ModuleMember -Function Get-ProjectRoot, Get-NormalizedTextSha256, Read-EnvironmentConfig, Assert-Command, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
+Export-ModuleMember -Function Get-ProjectRoot, Get-NormalizedTextSha256, Read-EnvironmentConfig, Assert-Command, Resolve-PythonLaunch, Invoke-WithPrependedPath, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
