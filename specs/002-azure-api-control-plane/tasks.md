@@ -201,6 +201,17 @@ description: "Implementation tasks for moving the product API to Azure while ret
 
 ---
 
+## Phase 12: AWS Deployment Artifact Boundary
+
+**Purpose**: Let CloudFormation create packaged Lambda functions without granting document-runtime or cross-environment access to the CI artifact store.
+
+- [x] T065 [P] [US4] Add artifact-prefix, artifact-key, and key-purpose mutation cases in `tests/test_repository_validator.py`
+- [x] T066 [US4] Grant exact environment artifact reads/decrypt in `infra/bootstrap/template.yaml` and partition document/artifact KMS authorization with `KeyPurpose` in `infra/api/template.yaml` and `infra/bootstrap/template.yaml`
+- [x] T067 [US4] Extend the structured cross-template handler contract in `scripts/validate-repository.py` to reject broader or relocated artifact access
+- [x] T068 [US4] Validate the exact SAM artifact bucket, environment prefix, and KMS key producer coordinates in `scripts/deploy-platform.ps1`
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

@@ -148,9 +148,13 @@ def _cloudformation_scalar(value: Any) -> str | None:
 
 
 def _cloudformation_sub_equals(value: Any, expected: str) -> bool:
+    return _cloudformation_tagged_equals(value, "Sub", expected)
+
+
+def _cloudformation_tagged_equals(value: Any, tag: str, expected: Any) -> bool:
     return (
         isinstance(value, CloudFormationTaggedValue)
-        and value.tag == "Sub"
+        and value.tag == tag
         and value.value == expected
     )
 
@@ -411,6 +415,26 @@ def validate_platform_cloudformation_handler_contract(
 
     api_resources = api_template.get("Resources")
     require(isinstance(api_resources, dict), "AWS platform template must declare Resources.")
+
+    def resource_tag_value(resource: Any, key: str) -> Any:
+        properties = resource.get("Properties") if isinstance(resource, dict) else None
+        tags = properties.get("Tags") if isinstance(properties, dict) else None
+        if not isinstance(tags, list):
+            return None
+        matches = [
+            tag.get("Value")
+            for tag in tags
+            if isinstance(tag, dict) and tag.get("Key") == key
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    data_key = api_resources.get("DataKey")
+    require(
+        isinstance(data_key, dict)
+        and data_key.get("Type") == "AWS::KMS::Key"
+        and resource_tag_value(data_key, "KeyPurpose") == "document-data",
+        "Platform DataKey must carry the exact document-data KeyPurpose tag.",
+    )
     resource_name_contracts = (
         (
             "RegistryTable",
@@ -439,6 +463,62 @@ def validate_platform_cloudformation_handler_contract(
 
     bootstrap_resources = bootstrap_template.get("Resources")
     require(isinstance(bootstrap_resources, dict), "AWS bootstrap template must declare Resources.")
+    artifact_bucket = bootstrap_resources.get("ArtifactBucket")
+    artifact_bucket_properties = (
+        artifact_bucket.get("Properties") if isinstance(artifact_bucket, dict) else None
+    )
+    require(
+        isinstance(artifact_bucket, dict)
+        and artifact_bucket.get("Type") == "AWS::S3::Bucket"
+        and isinstance(artifact_bucket_properties, dict)
+        and _cloudformation_sub_equals(
+            artifact_bucket_properties.get("BucketName"),
+            "loan-document-${EnvironmentName}-ci-artifacts-${AWS::AccountId}-${AWS::Region}",
+        ),
+        "ArtifactBucket must keep the deterministic name used by deployment artifact access.",
+    )
+    artifact_bucket_encryption = artifact_bucket_properties.get("BucketEncryption")
+    artifact_bucket_encryption_rules = (
+        artifact_bucket_encryption.get("ServerSideEncryptionConfiguration")
+        if isinstance(artifact_bucket_encryption, dict)
+        else None
+    )
+    artifact_bucket_encryption_rule = (
+        artifact_bucket_encryption_rules[0]
+        if isinstance(artifact_bucket_encryption_rules, list)
+        and len(artifact_bucket_encryption_rules) == 1
+        else None
+    )
+    artifact_bucket_encryption_default = (
+        artifact_bucket_encryption_rule.get("ServerSideEncryptionByDefault")
+        if isinstance(artifact_bucket_encryption_rule, dict)
+        else None
+    )
+    require(
+        isinstance(artifact_bucket_encryption, dict)
+        and set(artifact_bucket_encryption) == {"ServerSideEncryptionConfiguration"}
+        and isinstance(artifact_bucket_encryption_rule, dict)
+        and set(artifact_bucket_encryption_rule)
+        == {"BucketKeyEnabled", "ServerSideEncryptionByDefault"}
+        and artifact_bucket_encryption_rule.get("BucketKeyEnabled") is True
+        and isinstance(artifact_bucket_encryption_default, dict)
+        and set(artifact_bucket_encryption_default)
+        == {"SSEAlgorithm", "KMSMasterKeyID"}
+        and artifact_bucket_encryption_default.get("SSEAlgorithm") == "aws:kms"
+        and _cloudformation_tagged_equals(
+            artifact_bucket_encryption_default.get("KMSMasterKeyID"),
+            "GetAtt",
+            "ArtifactKey.Arn",
+        ),
+        "ArtifactBucket must use ArtifactKey with S3 Bucket Keys for its reviewed encryption context.",
+    )
+    artifact_key = bootstrap_resources.get("ArtifactKey")
+    require(
+        isinstance(artifact_key, dict)
+        and artifact_key.get("Type") == "AWS::KMS::Key"
+        and resource_tag_value(artifact_key, "KeyPurpose") == "deployment-artifacts",
+        "ArtifactKey must carry the exact deployment-artifacts KeyPurpose tag.",
+    )
     platform_role = bootstrap_resources.get("PlatformCloudFormationExecutionRole")
     platform_properties = (
         platform_role.get("Properties") if isinstance(platform_role, dict) else None
@@ -504,8 +584,10 @@ def validate_platform_cloudformation_handler_contract(
     def action_scope_targets_services(
         statement: dict[str, Any], services: set[str]
     ) -> bool:
-        if statement.get("Effect") != "Allow":
-            return False
+        require(
+            statement.get("Effect") in {"Allow", "Deny"},
+            "Platform CloudFormation handler IAM effects must be statically reviewable.",
+        )
         if "NotAction" in statement:
             return True
         action_patterns = _iam_scope_patterns(
@@ -570,10 +652,30 @@ def validate_platform_cloudformation_handler_contract(
         for statement in platform_statements
         if action_scope_targets_services(statement, {"dynamodb", "s3"})
     ]
+    artifact_read_statements = [
+        statement
+        for statement in platform_statements
+        if statement.get("Sid") == "ReadPlatformDeploymentArtifacts"
+    ]
+    artifact_read_statement = (
+        artifact_read_statements[0] if len(artifact_read_statements) == 1 else {}
+    )
+    require(
+        len(artifact_read_statements) == 1
+        and set(artifact_read_statement) == {"Sid", "Effect", "Action", "Resource"}
+        and artifact_read_statement.get("Effect") == "Allow"
+        and artifact_read_statement.get("Action") == "s3:GetObject"
+        and _cloudformation_sub_equals(
+            artifact_read_statement.get("Resource"),
+            "${ArtifactBucket.Arn}/platform/${EnvironmentName}/*",
+        ),
+        "Platform CloudFormation must read only its environment deployment-artifact prefix.",
+    )
     require(
         len(identity_statements) == 1
-        and len(relevant_identity_grants) == 1
-        and relevant_identity_grants[0] is identity_statement
+        and len(relevant_identity_grants) == 2
+        and {id(statement) for statement in relevant_identity_grants}
+        == {id(identity_statement), id(artifact_read_statement)}
         and set(identity_statement) == {"Sid", "Effect", "Action", "Resource"}
         and identity_statement.get("Sid") == "ExactPlatformResources"
         and identity_statement.get("Effect") == "Allow"
@@ -604,6 +706,140 @@ def validate_platform_cloudformation_handler_contract(
         }
         == expected_resource_arns,
         "Platform CloudFormation resource names must match the exact authorized table and bucket ARNs.",
+    )
+
+    artifact_decrypt_statements = [
+        statement
+        for statement in platform_statements
+        if statement.get("Sid") == "DecryptPlatformDeploymentArtifacts"
+        or _cloudformation_tagged_equals(
+            statement.get("Resource"), "GetAtt", "ArtifactKey.Arn"
+        )
+    ]
+    artifact_decrypt_statement = (
+        artifact_decrypt_statements[0]
+        if len(artifact_decrypt_statements) == 1
+        else {}
+    )
+    artifact_decrypt_condition = artifact_decrypt_statement.get("Condition")
+    artifact_decrypt_via_service = (
+        artifact_decrypt_condition.get("StringEquals")
+        if isinstance(artifact_decrypt_condition, dict)
+        else None
+    )
+    artifact_decrypt_context = (
+        artifact_decrypt_via_service.get("kms:EncryptionContext:aws:s3:arn")
+        if isinstance(artifact_decrypt_via_service, dict)
+        else None
+    )
+    require(
+        len(artifact_decrypt_statements) == 1
+        and set(artifact_decrypt_statement)
+        == {"Sid", "Effect", "Action", "Resource", "Condition"}
+        and artifact_decrypt_statement.get("Sid")
+        == "DecryptPlatformDeploymentArtifacts"
+        and artifact_decrypt_statement.get("Effect") == "Allow"
+        and artifact_decrypt_statement.get("Action") == "kms:Decrypt"
+        and _cloudformation_tagged_equals(
+            artifact_decrypt_statement.get("Resource"),
+            "GetAtt",
+            "ArtifactKey.Arn",
+        )
+        and isinstance(artifact_decrypt_condition, dict)
+        and set(artifact_decrypt_condition) == {"StringEquals"}
+        and isinstance(artifact_decrypt_via_service, dict)
+        and set(artifact_decrypt_via_service)
+        == {"kms:ViaService", "kms:EncryptionContext:aws:s3:arn"}
+        and _cloudformation_sub_equals(
+            artifact_decrypt_via_service.get("kms:ViaService"),
+            "s3.${AWS::Region}.${AWS::URLSuffix}",
+        )
+        and _cloudformation_tagged_equals(
+            artifact_decrypt_context,
+            "GetAtt",
+            "ArtifactBucket.Arn",
+        ),
+        "Platform CloudFormation must decrypt only the exact deployment ArtifactKey.",
+    )
+
+    def statement_by_sid(sid: str) -> dict[str, Any]:
+        matches = [
+            statement for statement in platform_statements if statement.get("Sid") == sid
+        ]
+        require(len(matches) == 1, f"Platform CloudFormation requires one exact {sid} statement.")
+        return matches[0]
+
+    create_data_key_statement = statement_by_sid("CreateTaggedDataKey")
+    create_data_key_condition = create_data_key_statement.get("Condition")
+    create_data_key_tags = (
+        create_data_key_condition.get("StringEquals")
+        if isinstance(create_data_key_condition, dict)
+        else None
+    )
+    require(
+        set(create_data_key_statement) == {"Sid", "Effect", "Action", "Resource", "Condition"}
+        and create_data_key_statement.get("Effect") == "Allow"
+        and create_data_key_statement.get("Action") == "kms:CreateKey"
+        and create_data_key_statement.get("Resource") == "*"
+        and isinstance(create_data_key_tags, dict)
+        and set(create_data_key_tags)
+        == {
+            "aws:RequestTag/Application",
+            "aws:RequestTag/Environment",
+            "aws:RequestTag/KeyPurpose",
+        }
+        and create_data_key_tags.get("aws:RequestTag/Application")
+        == "loan-document-platform"
+        and _cloudformation_tagged_equals(
+            create_data_key_tags.get("aws:RequestTag/Environment"),
+            "Ref",
+            "EnvironmentName",
+        )
+        and create_data_key_tags.get("aws:RequestTag/KeyPurpose") == "document-data",
+        "Platform CloudFormation may create only purpose-tagged document data keys.",
+    )
+
+    manage_data_key_statement = statement_by_sid("ManageTaggedDataKeys")
+    manage_data_key_condition = manage_data_key_statement.get("Condition")
+    manage_data_key_tags = (
+        manage_data_key_condition.get("StringEquals")
+        if isinstance(manage_data_key_condition, dict)
+        else None
+    )
+    require(
+        set(manage_data_key_statement) == {"Sid", "Effect", "Action", "Resource", "Condition"}
+        and manage_data_key_statement.get("Effect") == "Allow"
+        and manage_data_key_statement.get("Action") == "kms:*"
+        and _cloudformation_sub_equals(
+            manage_data_key_statement.get("Resource"),
+            "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*",
+        )
+        and isinstance(manage_data_key_tags, dict)
+        and set(manage_data_key_tags)
+        == {
+            "aws:ResourceTag/Application",
+            "aws:ResourceTag/Environment",
+            "aws:ResourceTag/KeyPurpose",
+        }
+        and manage_data_key_tags.get("aws:ResourceTag/Application")
+        == "loan-document-platform"
+        and _cloudformation_tagged_equals(
+            manage_data_key_tags.get("aws:ResourceTag/Environment"),
+            "Ref",
+            "EnvironmentName",
+        )
+        and manage_data_key_tags.get("aws:ResourceTag/KeyPurpose") == "document-data",
+        "Platform CloudFormation data-key management must exclude deployment artifact keys.",
+    )
+    kms_decrypt_statements = action_candidates(
+        {"kms:Decrypt"},
+        {"ManageTaggedDataKeys", "DecryptPlatformDeploymentArtifacts"},
+    )
+    require(
+        len(kms_decrypt_statements) == 2
+        and {id(statement) for statement in kms_decrypt_statements}
+        == {id(manage_data_key_statement), id(artifact_decrypt_statement)},
+        "Only the reviewed purpose-tagged data-key and artifact decrypt grants may cover kms:Decrypt.",
     )
 
     expected_mount_actions = {
@@ -665,6 +901,22 @@ def validate_platform_cloudformation_handler_contract(
         == {"StringEquals": {"iam:AWSServiceName": "backup.amazonaws.com"}},
         "Platform CloudFormation may create only the exact approved service-linked roles.",
     )
+
+
+def validate_platform_packaging_contract(script_text: str) -> None:
+    """Keep SAM's artifact producer coordinates aligned with execution-role IAM."""
+
+    required_fragments = (
+        "'--s3-bucket', [string]$bootstrap.ArtifactBucketName",
+        "'--s3-prefix', \"platform/$($config.environment)\"",
+        "'--kms-key-id', [string]$bootstrap.ArtifactKeyArn",
+    )
+    for fragment in required_fragments:
+        require(
+            script_text.count(fragment) == 1,
+            "Platform SAM packaging must use the exact reviewed artifact bucket, "
+            "environment prefix, and encryption key.",
+        )
 
 
 def validate_workflow_actions(value: Any, path: Path) -> None:
@@ -1032,6 +1284,7 @@ def validate_azure_control_plane() -> None:
 
     deploy_platform = (ROOT / "scripts" / "deploy-platform.ps1").read_text(encoding="utf-8")
     deploy_idp = (ROOT / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
+    validate_platform_packaging_contract(deploy_platform)
     for required_fragment in (
         "PlatformCloudFormationExecutionRoleArn",
         "PlatformRolePermissionsBoundaryArn",
