@@ -1,3 +1,5 @@
+#requires -Version 7.2
+
 [CmdletBinding()]
 param(
     [string]$EnvironmentFile,
@@ -21,7 +23,6 @@ $commands = @(
     @{ Name = 'aws'; Package = 'Amazon.AWSCLI'; Hint = 'Install AWS CLI v2.' },
     @{ Name = 'sam'; Package = 'Amazon.SAM-CLI'; Hint = 'Install AWS SAM CLI.' },
     @{ Name = 'az'; Package = 'Microsoft.AzureCLI'; Hint = 'Install Azure CLI.' },
-    @{ Name = 'python'; Package = 'Python.Python.3.13'; Hint = 'Install Python 3.13.' },
     @{ Name = 'node'; Package = 'OpenJS.NodeJS.LTS'; Hint = 'Install Node.js 22 or later.' },
     @{ Name = 'trivy'; Package = 'AquaSecurity.Trivy'; Version = $requiredTrivyVersion; Hint = 'Install the pinned Trivy scanner for the immutable production image gate.' }
 )
@@ -42,6 +43,22 @@ foreach ($command in $commands) {
         & winget @wingetArguments
         if ($LASTEXITCODE -ne 0) { throw "Failed to install $($command.Package)." }
     }
+}
+
+$platformPython = Resolve-PythonLaunch -Version '3.13' -AllowMissing
+if ($null -eq $platformPython) {
+    if (-not $InstallMissing) {
+        throw 'Missing Python 3.13 for platform development. Re-run with -InstallMissing to use winget on Windows.'
+    }
+    if (-not $IsWindows) {
+        throw 'Install Python 3.13 with the operating system package manager, then rerun bootstrap.'
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw 'winget is unavailable; install Python 3.13 manually.'
+    }
+    & winget install --id Python.Python.3.13 --exact --source winget --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to install Python.Python.3.13.' }
+    $platformPython = Resolve-PythonLaunch -Version '3.13'
 }
 
 $idpPython = Resolve-PythonLaunch -Version $requiredIdpPythonVersion -AllowMissing
@@ -65,7 +82,11 @@ if ($trivyVersion -ne "Version: $requiredTrivyVersion") {
     throw "Trivy $requiredTrivyVersion is required; found '$trivyVersion'."
 }
 
-$pythonVersion = & python --version
+$pythonVersionArguments = @($platformPython.PrefixArguments) + @('--version')
+$pythonVersion = (& $platformPython.FilePath @pythonVersionArguments 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $pythonVersion -cnotmatch '^Python 3\.13(?:\.|$)') {
+    throw 'The resolved platform Python runtime failed its exact 3.13 version check.'
+}
 $nodeVersion = & node --version
 Write-Host "Toolchain installed: $pythonVersion; IDP CLI Python $($idpPython.Version); Node $nodeVersion"
 
@@ -78,10 +99,11 @@ if ([string]::IsNullOrWhiteSpace($EnvironmentFile)) {
 $config = Read-EnvironmentConfig -Path $EnvironmentFile
 
 if ($config.corporateCaBundlePath) {
-    $caPath = (Resolve-Path -LiteralPath $config.corporateCaBundlePath).Path
+    $caPath = Assert-CertificateOnlyBundle -Path ([string]$config.corporateCaBundlePath)
     $env:REQUESTS_CA_BUNDLE = $caPath
     $env:SSL_CERT_FILE = $caPath
-    Write-Host "Configured this process to trust corporate CA bundle: $caPath"
+    $env:AWS_CA_BUNDLE = $caPath
+    Write-Host 'Configured this process to trust the approved corporate CA bundle.'
 }
 
 Assert-AwsIdentity -Profile $config.awsProfile -Region $config.awsRegion -ExpectedAccountId $config.awsAccountId | Out-Null
@@ -89,18 +111,24 @@ Assert-AwsIdentity -Profile $config.awsProfile -Region $config.awsRegion -Expect
 & gh auth status
 if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI is not signed in. Run gh auth login.' }
 
-& az account set --subscription $config.azureSubscriptionId
-if ($LASTEXITCODE -ne 0) { throw "Cannot select Azure subscription '$($config.azureSubscriptionId)'." }
-$azAccount = & az account show --output json | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'Azure CLI is not signed in. Run az login for the target tenant.' }
-if ($azAccount.tenantId -ne $config.entraTenantId) {
-    throw "Azure CLI tenant $($azAccount.tenantId) does not match $($config.entraTenantId)."
+Invoke-AzureCli -Arguments @(
+    'account', 'set', '--subscription', [string]$config.azureSubscriptionId
+) | Out-Null
+$azAccountRaw = @(Invoke-AzureCli -Arguments @('account', 'show', '--output', 'json'))
+try {
+    $azAccount = $azAccountRaw | Out-String | ConvertFrom-Json -Depth 20
+} catch {
+    throw 'Azure account lookup returned invalid JSON.'
 }
-if ($azAccount.id -ne $config.azureSubscriptionId) {
-    throw "Azure CLI subscription $($azAccount.id) does not match $($config.azureSubscriptionId)."
+$azureIdentityArguments = @{
+    Account = $azAccount
+    ExpectedSubscriptionId = [string]$config.azureSubscriptionId
+    ExpectedTenantId = [string]$config.entraTenantId
 }
-& az bicep build --file (Join-Path (Get-ProjectRoot) 'infra/azure/main.bicep') --stdout | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Azure Bicep compilation failed.' }
+Assert-AzureIdentity @azureIdentityArguments | Out-Null
+Invoke-AzureCli -Arguments @(
+    'bicep', 'build', '--file', (Join-Path (Get-ProjectRoot) 'infra/azure/main.bicep'), '--stdout'
+) | Out-Null
 
 Write-Host "Toolchain ready: $pythonVersion; IDP CLI Python $($idpPython.Version); Node $nodeVersion"
 Write-Host 'No certificate validation was disabled and no cloud credential was written.'

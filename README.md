@@ -102,41 +102,64 @@ only short-lived, object-constrained S3 grants—never AWS credentials.
 
 ## Repository and delivery bootstrap
 
-1. Copy `config/environments/prod.example.json` to an ignored environment file
-   and provide the listed non-secret Azure, AWS, Entra, DNS, and GitHub values.
-2. Authenticate to Azure with the intended tenant/subscription and to AWS through
-   an IAM Identity Center profile. Do not create a publish profile, client
-   secret, or AWS access key.
-3. Run `scripts/bootstrap.ps1 -InstallMissing`; it keeps Python 3.13 for the
-   platform and installs a separate Python 3.12 runtime for the pinned IDP CLI.
-   Then run it with the ignored environment file to verify both cloud identities.
+1. Run `scripts/bootstrap.ps1 -InstallMissing` without an environment file. It
+   installs or verifies the local Git, GitHub, Azure, AWS, SAM, Python, Node, and
+   scanning toolchain without performing cloud identity checks.
+2. Run `Copy-Item ./config/environments/prod.example.json
+   ./config/environments/dev.json`, change `environment` to `dev`, and set the
+   environment-specific resource names, region, limits, retention, and stack
+   names. Never edit or fill the tracked example itself.
+3. Authenticate Azure to the intended tenant/subscription, AWS through an IAM
+   Identity Center profile, and GitHub CLI to the repository account. Do not
+   create a publish profile, client secret, or AWS access key.
+4. Run `scripts/configure-environment.ps1 -EnvironmentFile
+   ./config/environments/dev.json`. This reviewed script discovers the active
+   Azure/AWS identities, auto-selects the sole public Route 53 zone or validates
+   a masked hosted-zone ID, collects hosts and contacts through masked prompts,
+   validates the complete candidate, and atomically replaces only the ignored
+   file. When multiple AWS profiles exist, set `awsProfile` in the ignored file
+   or pass `-AwsProfile`. It auto-detects
+   `$HOME/.certs/cloud-ca-bundle.pem` or accepts `-CorporateCaBundlePath`; only
+   parseable X.509 `CERTIFICATE` PEM blocks are accepted. The bundle and filled
+   configuration remain local.
+5. Run `scripts/bootstrap.ps1 -EnvironmentFile
+   ./config/environments/dev.json` to verify both cloud identities and compile
+   the Azure template. The installed toolchain keeps Python 3.13 for the platform
+   and a separate Python 3.12 runtime for the pinned IDP CLI.
    On Windows, `deploy-idp.ps1` validates the installed SAM/Node/npm layout and
    creates digest-bound native child-tool relays inside only the managed Python
-   3.12 environment; it does not patch vendor source or invoke `cmd.exe`.
-4. Run `scripts/provision-github.ps1` to create/configure the public repository,
+   3.12 environment; it does not patch vendor source or invoke `cmd.exe`. The
+   same cache identity pins the cfn-lint, Ruff, and uv tools invoked directly by
+   the upstream publisher.
+6. Run `scripts/provision-github.ps1` to create/configure the public repository,
    protected environment, exact GitHub-to-AWS OIDC role, and AWS bootstrap.
-5. Run `scripts/configure-github-protection.ps1` after the reviewed baseline is
+7. Run `scripts/configure-github-protection.ps1` after the reviewed baseline is
    on `main` to enforce validation, exact-head Copilot review, resolved
    conversations, and the protected production environment.
-6. Run `scripts/provision-entra.ps1` for the product API, SPA, and optional
+8. Run `scripts/provision-entra.ps1` for the product API, SPA, and optional
    certificate-authenticated service client. Run `scripts/deploy-azure.ps1
    -FoundationOnly`, then `scripts/provision-entra-federation.ps1` for the
    dedicated managed-identity audience.
-7. Run `scripts/provision-github-azure.ps1` to establish exact GitHub-to-Azure
+9. Run `scripts/provision-github-azure.ps1` to establish exact GitHub-to-Azure
    OIDC and exact-scope deployment roles, then `scripts/sync-github-entra.ps1`
    to publish only non-secret IDs to the protected GitHub environment.
-8. Run `scripts/deploy-all.ps1 -SkipAzureFoundation -SkipEntra` for the private
+10. Run `scripts/deploy-all.ps1 -SkipAzureFoundation -SkipEntra` for the private
    AWS runtime, pinned headless IDP, deep-federation-gated Azure API revision,
    and optional Static Web Apps publication. Stage the API certificate with
    `-BindApiCustomDomain`; run `scripts/cutover-api-domain.ps1` only after the
    default hostname passes acceptance.
-9. Complete every live authorization, malware, IDP, restore,
+11. Complete every live authorization, malware, IDP, restore,
    certificate, alarm, cost, and synthetic end-to-end acceptance gate in the
    runbook before declaring production ready.
 
 No script may request or print an AWS access key, Entra/Azure application secret,
 managed-identity token, temporary STS credential, certificate private key, PDF,
 OCR text, extracted value, or signed URL.
+
+Supported operational procedures live in `scripts/`. When a repeatable setup,
+deployment, validation, recovery, or rotation block succeeds, its generic form,
+synthetic tests, and runbook instructions must be reviewed and merged; shell
+history or chat text is not the production source of truth.
 
 The repository is public to use standard free GitHub-hosted Actions and public-
 repository protection. Public visibility does not make mortgage data public:

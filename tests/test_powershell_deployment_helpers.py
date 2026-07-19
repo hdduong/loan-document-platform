@@ -132,7 +132,7 @@ def test_python_launch_resolver_fails_closed_for_a_missing_minor() -> None:
     result = json.loads(run_powershell(script, environment=os.environ.copy()))
 
     assert result["Missing"] is True
-    assert "Python 99.99 is required for the pinned IDP CLI" in result["Message"]
+    assert "Python 99.99 is required" in result["Message"]
 
 
 @pytest.mark.parametrize("raise_inside", [False, True])
@@ -466,6 +466,11 @@ def test_idp_cli_toolchain_keeps_python_runtimes_split() -> None:
     )
 
     assert lock["cliPythonVersion"] == "3.12"
+    assert lock["cliBuildTools"] == {
+        "cfnLint": "1.53.0",
+        "ruff": "0.15.21",
+        "uv": "0.9.6",
+    }
     assert "foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm')" in deploy
     assert "foreach ($command in 'aws', 'git', 'python'," not in deploy
     assert '.local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag' in deploy
@@ -476,10 +481,26 @@ def test_idp_cli_toolchain_keeps_python_runtimes_split() -> None:
     assert "$cliEnvironment = @{ PYTHONUTF8 = '1' }" in deploy
     assert "$cliEnvironment[$entry.Name] = [string]$entry.Value" in deploy
     assert "IsNullOrWhiteSpace([string]$entry.Value)" not in deploy
+    for fragment in (
+        '"cfn-lint==$($lock.cliBuildTools.cfnLint)"',
+        '"ruff==$($lock.cliBuildTools.ruff)"',
+        '"uv==$($lock.cliBuildTools.uv)"',
+        "'--force-reinstall', '--no-deps'",
+        "|tools=$buildToolIdentity",
+        "$buildToolExecutables = @(",
+        "($bridgeExecutables + $buildToolExecutables)",
+    ):
+        assert fragment in deploy
+    for executable in ("ruff", "cfn-lint", "uv"):
+        assert deploy.index(
+            f"Invoke-Checked -Command {executable} -Arguments @('--version')"
+        ) < deploy.index("[IO.File]::WriteAllText($installMarker")
     assert deploy.index("Invoke-Checked -Command sam -Arguments @('--version')") < deploy.index(
         "[IO.File]::WriteAllText($installMarker"
     )
     assert "Python.Python.3.12" in bootstrap
+    assert "Resolve-PythonLaunch -Version '3.13'" in bootstrap
+    assert "& python --version" not in bootstrap
     assert production.index("python-version: '3.12'") < production.index(
         "python-version: '3.13'"
     )
@@ -600,7 +621,10 @@ def test_msi_launch_preserves_literal_arguments_and_restores_installer(tmp_path:
 
 def test_failed_msi_launch_restores_installer(tmp_path: Path) -> None:
     failure = tmp_path / "fail.ps1"
-    failure.write_text("exit 9\n", encoding="utf-8")
+    failure.write_text(
+        "[Console]::Error.WriteLine('do-not-emit-azure-stderr'); exit 9\n",
+        encoding="utf-8",
+    )
     module_path = str(COMMON_MODULE).replace("'", "''")
     script = (
         f"$module = Import-Module -Force -PassThru '{module_path}'; "
@@ -609,6 +633,7 @@ def test_failed_msi_launch_restores_installer(tmp_path: Path) -> None:
         "PrefixArguments = @('-NoLogo', '-NoProfile', '-File', "
         "[Environment]::GetEnvironmentVariable('TEST_AZ_FAILURE')); Installer = 'MSI' }; "
         "$env:AZ_INSTALLER = 'original'; "
+        "$PSNativeCommandUseErrorActionPreference = $true; "
         "$failedClosed = $false; "
         "$message = ''; "
         "$uri = 'https://graph.microsoft.com/v1.0/applications/"
@@ -618,20 +643,30 @@ def test_failed_msi_launch_restores_installer(tmp_path: Path) -> None:
         "@('rest', '--method', 'GET', '--uri', $target, '--body', '{\"private\":true}') "
         "} $launch $uri | Out-Null } catch { $failedClosed = $true; $message = $_.Exception.Message }; "
         "$result = [pscustomobject]@{ FailedClosed = $failedClosed; "
-        "After = $env:AZ_INSTALLER; Message = $message }; "
+        "After = $env:AZ_INSTALLER; NativePreferenceAfter = "
+        "$PSNativeCommandUseErrorActionPreference; Message = $message }; "
         "[Console]::Out.Write(($result | ConvertTo-Json -Compress))"
     )
     environment = os.environ.copy()
     environment["TEST_AZ_FAILURE"] = str(failure)
 
-    result = json.loads(run_powershell(script, environment=environment))
+    completed = subprocess.run(
+        ["pwsh", "-NoLogo", "-NoProfile", "-Command", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    result = json.loads(completed.stdout)
 
     assert result["FailedClosed"] is True
     assert result["After"] == "original"
+    assert result["NativePreferenceAfter"] is True
     assert "az rest GET graph.microsoft.com/v1.0/applications/{id}" in result["Message"]
     assert "11111111-1111-1111-1111-111111111111" not in result["Message"]
     assert "$filter" not in result["Message"]
     assert "private" not in result["Message"]
+    assert "do-not-emit-azure-stderr" not in completed.stdout + completed.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX fake executable exercises the native az path")

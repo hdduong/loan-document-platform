@@ -41,11 +41,14 @@ The migration deliberately keeps one registry in DynamoDB. Moving the API runtim
 | Privacy and Zero-Trust Boundaries | Entra user-token validation stays at the public API; a separate managed workload token is exchanged for scoped temporary AWS credentials; document bytes bypass the API. | PASS |
 | Deterministic Processing and Provenance | The existing clean-version gate, two-pass configs, deterministic selection, and exact artifact provenance remain in AWS. | PASS |
 | Testable, Reviewable Changes | Runtime, auth, federation, contract, IaC, migration, and negative paths receive automated tests plus per-file coverage. | PASS |
-| Scripted, Observable, Cost-Aware Operations | Azure and AWS provisioning use IaC/scripts and workload OIDC; alarms, logs, backup, restore, and budget controls remain explicit. | PASS |
+| Scripted, Observable, Cost-Aware Operations | Azure and AWS provisioning use IaC/scripts and workload OIDC; the ignored environment file is populated only by a reviewed fail-closed configurator; alarms, logs, backup, restore, and budget controls remain explicit. | PASS |
 | Exact-Head Copilot Review | Delivery remains pull-request based with exact-current-head Copilot review after every push. | PASS |
 | Coverage and Browser Integration | Each new service file is included in the 80% gate; runtime/UI changes retain deterministic synthetic browser tests. | PASS |
 
-The constitution will be amended from 1.2.0 to 1.3.0 to make the Azure control-plane and Entra-to-AWS federation boundary normative. This expands an operational principle without removing an existing safety gate.
+The constitution is amended to 1.4.0 to make successful repeatable operator
+procedures repository-owned, tested, and documented before they become
+supported next steps. This expands the scripted-operations principle without
+weakening the Azure control-plane, federation, review, or privacy gates.
 
 ## Architecture Decisions
 
@@ -126,6 +129,33 @@ are part of the cache marker, tool discovery excludes that managed environment,
 and smoke tests must pass before the marker is written. No upstream IDP source,
 SAM installation, or Node installation is patched.
 
+The publisher also invokes Ruff, cfn-lint, and uv directly during a headless
+source build; headless mode does not disable those validation and layer-build
+steps. Their reviewed versions are recorded in the IDP lock and installed into
+the same Python 3.12 environment so Python child-process lookup is independent
+of mutable workstation-global tools. The three pins participate in the cache
+identity, metadata and executable checks run before the marker is written, and
+the selected Ruff version is tested against the exact vendored source. AWS CLI
+v2 remains the native authenticated client, while the publisher's best-effort
+`rm` cleanup fallback is not promoted into a managed prerequisite.
+
+Environment bootstrapping follows the same reviewed-procedure boundary. A
+PowerShell 7.2-or-later configurator reads the unfilled ignored JSON, checks that Git does
+not track it, uses the safe Azure CLI launcher and shared AWS invocation helper,
+and compares any existing trust anchors with the authenticated sessions before
+preparing the replacement object. It auto-selects the sole public Route 53 zone
+or requires one exact public-zone ID when several exist,
+canonicalizes distinct UI/API hosts, rejects contacts with control characters,
+and accepts a CA bundle only when every PEM object is a parseable X.509
+`CERTIFICATE` block.
+The completed object is written as UTF-8 without a byte-order mark to a sibling
+ignored file, validated with `Read-EnvironmentConfig`, and atomically replaces
+the target with a transient ignored backup. Authenticated identifiers, profile
+names, contacts, host values, and the completed object are not emitted, and no
+populated value is committed. Synthetic CLI tests exercise the complete
+noninteractive flow on hosted Linux; Windows tests cover helper behavior,
+candidate validation, atomic replacement, and PowerShell parsing.
+
 ## Project Structure
 
 ### Documentation (this feature)
@@ -170,6 +200,7 @@ infra/
     └── template.yaml            # AWS deployment identity permissions
 
 scripts/
+├── configure-environment.ps1    # ignored local cloud/DNS/contact configuration
 ├── provision-entra.ps1          # API/SPA/federation apps and managed-identity role grant
 ├── deploy-azure.ps1             # Azure foundation, image, revision, domain/cert
 ├── deploy-platform.ps1          # private AWS runtime/federation stack
@@ -178,6 +209,7 @@ scripts/
 └── deploy-all.ps1               # ordered cross-cloud orchestration
 
 tests/
+├── test_environment_configuration.py
 ├── test_azure_api_auth.py
 ├── test_azure_api_domain.py
 ├── test_azure_api_http.py

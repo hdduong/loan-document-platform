@@ -32,6 +32,16 @@ if ($lock.deploymentMode -ne 'headless') { throw 'The committed IDP lock must sp
 if ([string]$lock.cliPythonVersion -cne '3.12') {
     throw 'The reviewed IDP 0.5.16 CLI dependency set requires Python 3.12.'
 }
+$reviewedBuildTools = @{
+    cfnLint = '1.53.0'
+    ruff = '0.15.21'
+    uv = '0.9.6'
+}
+foreach ($name in $reviewedBuildTools.Keys) {
+    if ([string]$lock.cliBuildTools.$name -cne $reviewedBuildTools[$name]) {
+        throw "The pinned IDP publisher requires reviewed $name version $($reviewedBuildTools[$name])."
+    }
+}
 $pythonRuntimeTag = ([string]$lock.cliPythonVersion).Replace('.', '')
 $venvDirectory = Join-Path $root ".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"
 $venvExecutableDirectory = if ($IsWindows) {
@@ -135,8 +145,15 @@ if ($IsWindows) {
         (Join-Path $venvDirectory 'Scripts/npm.exe')
     )
 }
+$buildToolIdentity = "cfn-lint=$($lock.cliBuildTools.cfnLint):ruff=$($lock.cliBuildTools.ruff):uv=$($lock.cliBuildTools.uv)"
+$executableSuffix = if ($IsWindows) { '.exe' } else { '' }
+$buildToolExecutables = @(
+    (Join-Path $venvExecutableDirectory "cfn-lint$executableSuffix"),
+    (Join-Path $venvExecutableDirectory "ruff$executableSuffix"),
+    (Join-Path $venvExecutableDirectory "uv$executableSuffix")
+)
 $installMarker = Join-Path $venvDirectory ".installed-$($lock.commit)-py$pythonRuntimeTag"
-$expectedInstallIdentity = "$($lock.commit)|python=$($lock.cliPythonVersion)|bridge=$bridgeIdentity"
+$expectedInstallIdentity = "$($lock.commit)|python=$($lock.cliPythonVersion)|bridge=$bridgeIdentity|tools=$buildToolIdentity"
 $installedIdentity = if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
     (Get-Content -Raw -LiteralPath $installMarker).Trim()
 } else {
@@ -145,7 +162,9 @@ $installedIdentity = if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
 $installRequired = $ReinstallCli -or
     -not (Test-Path -LiteralPath $pythonExecutable -PathType Leaf) -or
     $installedIdentity -cne $expectedInstallIdentity -or
-    @($bridgeExecutables | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0
+    @(($bridgeExecutables + $buildToolExecutables) | Where-Object {
+        -not (Test-Path -LiteralPath $_ -PathType Leaf)
+    }).Count -gt 0
 if ($installRequired) {
     if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
         [IO.File]::Delete($installMarker)
@@ -170,11 +189,21 @@ if ($installRequired) {
         '-e', "$(Join-Path $vendorDirectory 'lib/idp_common_pkg')[all]",
         '-e', (Join-Path $vendorDirectory 'lib/idp_sdk'),
         '-e', (Join-Path $vendorDirectory 'lib/idp_cli_pkg'),
-        'cfn-lint'
+        "cfn-lint==$($lock.cliBuildTools.cfnLint)",
+        "ruff==$($lock.cliBuildTools.ruff)",
+        "uv==$($lock.cliBuildTools.uv)"
     ) -FailureMessage 'Failed to install the pinned IDP CLI and build dependencies.'
+    Invoke-Checked -Command $pythonExecutable -Arguments @(
+        '-m', 'pip', 'install', '--disable-pip-version-check',
+        '--force-reinstall', '--no-deps',
+        "cfn-lint==$($lock.cliBuildTools.cfnLint)",
+        "ruff==$($lock.cliBuildTools.ruff)",
+        "uv==$($lock.cliBuildTools.uv)"
+    ) -FailureMessage 'Failed to repair the pinned IDP publisher child-tool executables.'
     if ($IsWindows) {
         Invoke-Checked -Command $pythonExecutable -Arguments @(
-            '-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps',
+            '-m', 'pip', 'install', '--disable-pip-version-check',
+            '--force-reinstall', '--no-deps',
             '--editable', $bridgePackageDirectory
         ) -FailureMessage 'Failed to install the reviewed Windows IDP child-tool bridge.'
     }
@@ -182,9 +211,11 @@ if ($installRequired) {
 Invoke-Checked -Command $pythonExecutable -Arguments @('-m', 'pip', 'check') -FailureMessage 'Pinned IDP CLI dependencies are inconsistent.'
 $dependencySmoke = 'import importlib.metadata as m; import idp_common, idp_sdk, idp_cli; assert m.version("numpy") == "1.26.4"'
 Invoke-Checked -Command $pythonExecutable -Arguments @('-c', $dependencySmoke) -FailureMessage 'Pinned IDP CLI dependency smoke test failed.'
-foreach ($bridgeExecutable in $bridgeExecutables) {
-    if (-not (Test-Path -LiteralPath $bridgeExecutable -PathType Leaf)) {
-        throw "Reviewed Windows IDP child-tool bridge was not installed: $bridgeExecutable"
+$buildToolSmoke = "import importlib.metadata as m; assert m.version('cfn-lint') == '$($lock.cliBuildTools.cfnLint)'; assert m.version('ruff') == '$($lock.cliBuildTools.ruff)'; assert m.version('uv') == '$($lock.cliBuildTools.uv)'"
+Invoke-Checked -Command $pythonExecutable -Arguments @('-c', $buildToolSmoke) -FailureMessage 'Pinned IDP publisher build-tool versions are inconsistent.'
+foreach ($requiredExecutable in ($bridgeExecutables + $buildToolExecutables)) {
+    if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
+        throw "Reviewed IDP child-tool executable was not installed: $requiredExecutable"
     }
 }
 
@@ -203,6 +234,9 @@ if ($null -ne $windowsCliBridge) {
 Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment -ScriptBlock {
     Invoke-Checked -Command sam -Arguments @('--version') -FailureMessage 'The native SAM CLI child-tool path is not executable.'
     Invoke-Checked -Command npm -Arguments @('--version') -FailureMessage 'The native npm child-tool path is not executable.'
+    Invoke-Checked -Command ruff -Arguments @('--version') -FailureMessage 'The pinned Ruff publisher prerequisite is not executable.'
+    Invoke-Checked -Command cfn-lint -Arguments @('--version') -FailureMessage 'The pinned cfn-lint publisher prerequisite is not executable.'
+    Invoke-Checked -Command uv -Arguments @('--version') -FailureMessage 'The pinned uv publisher prerequisite is not executable.'
 }
 if ($installRequired) {
     [IO.File]::WriteAllText($installMarker, $expectedInstallIdentity + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))

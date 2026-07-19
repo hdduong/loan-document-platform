@@ -6,7 +6,7 @@ The commands below must be run from the repository root. Never paste a bearer to
 
 ## Prerequisites
 
-- PowerShell 7, Git, Python 3.13 for repository/platform work, Python 3.12 for
+- PowerShell 7.2 or later, Git, Python 3.13 for repository/platform work, Python 3.12 for
   the pinned IDP CLI, and the repository virtual environment
 - Azure CLI with Bicep support and access to the intended subscription and Entra tenant
 - AWS CLI v2, AWS SAM CLI, and an IAM Identity Center profile for the intended account
@@ -129,25 +129,46 @@ Replace only the hostname with the ignored environment value. Do not put a real 
 
 ## 4. Prepare ignored environment input
 
-Create an environment file from the committed example and confirm Git ignores it:
+Install or verify the toolchain before the configurator calls Azure or AWS:
+
+```powershell
+./scripts/bootstrap.ps1 -InstallMissing
+```
+
+Create an environment file from the committed example, change `environment` to
+`dev`, set its resource-name/limit/retention fields, and confirm Git ignores it:
 
 ```powershell
 Copy-Item ./config/environments/prod.example.json ./config/environments/dev.json
 git check-ignore ./config/environments/dev.json
 ```
 
-Populate the ignored file locally with the reviewed Azure subscription/location/resource-group names, Entra tenant/application names, AWS account/region/profile, Route 53 zone, custom hostnames, alert destinations, budget, and pinned stack names. Do not add tokens, application secrets, private keys, AWS access keys, signed URLs, or document content.
-
-Verify the operator sessions locally:
+Authenticate the intended cloud sessions, then let the reviewed configurator
+populate identity, public DNS, hostname, contact, and CA-bundle fields. It does
+not display cloud identifiers, profile names, contact values, host values, or
+the completed configuration:
 
 ```powershell
 az login --tenant <tenant-guid>
 az account set --subscription <subscription-guid>
 aws sso login --profile <identity-center-profile>
+gh auth status
+./scripts/configure-environment.ps1 -EnvironmentFile ./config/environments/dev.json
 ./scripts/bootstrap.ps1 -EnvironmentFile ./config/environments/dev.json
 ```
 
-The bootstrap must reject a mismatched Azure tenant, Azure subscription, AWS account, or region before provisioning.
+The configurator requires an ignored non-example file, uses the configured AWS
+profile (or the sole installed profile), auto-selects the sole public Route 53
+zone or validates a masked hosted-zone ID, and reads new host/contact values
+through masked prompts. It validates canonical distinct hosts and contacts,
+preserves existing values on rerun, and replaces the JSON atomically only after
+`Read-EnvironmentConfig` accepts a sibling UTF-8-no-BOM candidate. It auto-detects
+`$HOME/.certs/cloud-ca-bundle.pem`; use `-CorporateCaBundlePath` for another
+approved bundle; it must contain only parseable X.509 `CERTIFICATE` PEM blocks.
+Never commit the bundle or filled file. The second bootstrap command must reject
+a mismatched Azure tenant, Azure subscription, AWS account, or region before
+provisioning. If TLS is intercepted, establish the approved process CA trust
+before the login commands; never disable certificate validation.
 
 ## 5. Deploy in the required order
 
@@ -215,6 +236,15 @@ before publishing. If validation reports an unsupported layout, repair or
 reinstall the official SAM CLI or Node.js distribution rather than copying or
 editing launchers. If only the local relay cache is stale, rerun
 `scripts/deploy-idp.ps1 -ReinstallCli`.
+
+The same managed environment contains the lock-pinned cfn-lint, Ruff, and uv
+versions used directly by the upstream publisher. Their versions are included
+in the cache marker and smoke-tested before any source build. Do not satisfy a
+missing-tool error by adding an unpinned global executable to `PATH`; rerun with
+`-ReinstallCli` to restore the reviewed local toolset. The pinned Ruff version
+must pass both `ruff check` and `ruff format --check` on IDP 0.5.16. Repair
+force-reinstalls only the exact child-tool and bridge packages after resolving
+their dependencies, so a deleted launcher is recreated without dependency drift.
 
 To resume only the Entra phase on Windows, use a single PowerShell 7 command; an MSI `az.cmd` entrypoint reported by `Get-Command az` is supported by the shared launcher:
 

@@ -1063,11 +1063,40 @@ def test_idp_python_toolchain_contract_rejects_runtime_drift() -> None:
             production,
             validation,
         )
+    with pytest.raises(ValueError, match="build-tool versions changed"):
+        validator.validate_idp_python_toolchain_contract(
+            {
+                **lock,
+                "cliBuildTools": {**lock["cliBuildTools"], "ruff": "999.0.0"},
+            },
+            deploy,
+            bootstrap,
+            production,
+            validation,
+        )
 
     with pytest.raises(ValueError, match="Pinned IDP Python gate lacks"):
         validator.validate_idp_python_toolchain_contract(
             lock,
             deploy.replace("lib/idp_common_pkg')[all]", "lib/idp_common_pkg')"),
+            bootstrap,
+            production,
+            validation,
+        )
+
+    with pytest.raises(ValueError, match="force-reinstall both"):
+        validator.validate_idp_python_toolchain_contract(
+            lock,
+            deploy.replace("'--force-reinstall', '--no-deps'", "'--no-deps'", 1),
+            bootstrap,
+            production,
+            validation,
+        )
+
+    with pytest.raises(ValueError, match="Pinned IDP Python gate lacks"):
+        validator.validate_idp_python_toolchain_contract(
+            lock,
+            deploy.replace("|tools=$buildToolIdentity", ""),
             bootstrap,
             production,
             validation,
@@ -1080,6 +1109,77 @@ def test_idp_python_toolchain_contract_rejects_runtime_drift() -> None:
         validator.validate_idp_python_toolchain_contract(
             lock, deploy, bootstrap, reordered, validation
         )
+
+
+def test_environment_configuration_contract_rejects_safety_regressions() -> None:
+    validator = load_validator()
+    repository = Path(__file__).resolve().parents[1]
+    configurator = (repository / "scripts" / "configure-environment.ps1").read_text(
+        encoding="utf-8"
+    )
+    common = (repository / "scripts" / "common.psm1").read_text(encoding="utf-8")
+    bootstrap = (repository / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")
+    gitignore = (repository / ".gitignore").read_text(encoding="utf-8")
+    constitution = (repository / ".specify" / "memory" / "constitution.md").read_text(
+        encoding="utf-8"
+    )
+
+    validator.validate_environment_configuration_script(
+        configurator, common, bootstrap, gitignore, constitution
+    )
+
+    mutations = (
+        configurator.replace("Invoke-AzureCli -Arguments", "& az", 1),
+        configurator.replace("'check-ignore', '--quiet'", "'status', '--short'", 1),
+        configurator.replace("Read-EnvironmentConfig -Path $temporaryPath", "# validation removed", 1),
+        configurator.replace("$env:AWS_CA_BUNDLE = $resolvedBundle", "# AWS trust removed", 1),
+        configurator.replace(
+            "Where-Object { -not [bool]$_.Config.PrivateZone }",
+            "Where-Object { $true }",
+            1,
+        ),
+        configurator.replace(
+            "Assert-ExistingValueMatches -Config $config -Name 'awsAccountId'",
+            "# account mismatch gate removed",
+            1,
+        ),
+        configurator.replace(") -CaptureJson -ForceProfile", ") -CaptureJson", 1),
+        configurator.replace(
+            "Remove-Item -LiteralPath $validatedConfigPath -Force -WhatIf:$false",
+            "# cleanup removed",
+            1,
+        ),
+        configurator.replace("([string]$AwsProfile).Trim()", "$AwsProfile.Trim()", 1),
+        configurator + '\nWrite-Host "AWS identity: unsafe"\n',
+    )
+    for mutation in mutations:
+        with pytest.raises(ValueError, match="Repository-owned environment configuration"):
+            validator.validate_environment_configuration_script(
+                mutation, common, bootstrap, gitignore, constitution
+            )
+
+    with pytest.raises(ValueError, match="AWS_CA_BUNDLE"):
+        validator.validate_environment_configuration_script(
+            configurator,
+            common,
+            bootstrap.replace("$env:AWS_CA_BUNDLE = $caPath", "# removed", 1),
+            gitignore,
+            constitution,
+        )
+
+
+def test_private_key_scanner_rejects_every_pem_private_key_label() -> None:
+    validator = load_validator()
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "validate-repository.py").read_text(
+        encoding="utf-8"
+    )
+
+    for label in ("PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "DSA PRIVATE KEY", "ED25519 PRIVATE KEY"):
+        marker = "-----BEGIN " + label + "-----"
+        assert validator.PRIVATE_KEY_PEM_PATTERN.search(marker)
+    assert validator.PRIVATE_KEY_PEM_PATTERN.search("-----BEGIN CERTIFICATE-----") is None
+    assert '"private key": PRIVATE_KEY_PEM_PATTERN' in source
+    assert "for label, pattern in secret_patterns.items():" in source
 
 
 def test_idp_windows_bridge_contract_rejects_shell_or_cache_drift() -> None:
@@ -1142,7 +1242,8 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
         ".dockerignore": "**/.env\n**/*.pem\n**/*.key\n**/*.pfx\n**/*.pdf\n",
         ".specify/feature.json": '{"feature_directory":"specs/002-azure-api-control-plane"}',
         "vendor/idp.lock.json": (
-            '{"deploymentMode":"headless","cliPythonVersion":"3.12"}'
+            '{"deploymentMode":"headless","cliPythonVersion":"3.12",'
+            '"cliBuildTools":{"cfnLint":"1.53.0","ruff":"0.15.21","uv":"0.9.6"}}'
         ),
         "scripts/deploy-idp.ps1": (
             "idp-cli deploy --headless IdpCloudFormationExecutionRoleArn "
@@ -1152,18 +1253,31 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             '".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag" '
             "lib/idp_common_pkg')[all] '-m', 'pip', 'check' "
             'm.version("numpy") == "1.26.4" '
+            '"cfn-lint==$($lock.cliBuildTools.cfnLint)" '
+            '"ruff==$($lock.cliBuildTools.ruff)" '
+            '"uv==$($lock.cliBuildTools.uv)" '
+            "'--force-reinstall', '--no-deps' "
+            "|tools=$buildToolIdentity $buildToolExecutables = @( "
+            "($bridgeExecutables + $buildToolExecutables) "
+            "foreach ($requiredExecutable in ($bridgeExecutables + $buildToolExecutables)) "
+            "m.version('cfn-lint') m.version('ruff') "
+            "m.version('uv') "
             "Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment "
             "Resolve-CommandSourceOutsidePath -Name sam "
             "Resolve-CommandSourceOutsidePath -Name node "
             "Resolve-CommandSourceOutsidePath -Name npm "
             "$bridgeSources = @( $bridgeIdentity = ($bridgeSources | ForEach-Object { "
             "Get-NormalizedTextSha256 -Path $_ }) $expectedInstallIdentity = "
-            "'--no-deps', '--editable', $bridgePackageDirectory "
+            "'--force-reinstall', '--no-deps' '--no-deps', '--editable', "
+            "$bridgePackageDirectory "
             "$cliEnvironment = @{ PYTHONUTF8 = '1' } IDP_SAM_NATIVE_EXECUTABLE "
             "IDP_SAM_CLI_PYTHON IDP_NPM_NATIVE_EXECUTABLE IDP_NODE_EXECUTABLE IDP_NPM_CLI_JS "
             "$cliEnvironment[$entry.Name] = [string]$entry.Value "
             "Invoke-Checked -Command sam -Arguments @('--version') "
             "Invoke-Checked -Command npm -Arguments @('--version') "
+            "Invoke-Checked -Command ruff -Arguments @('--version') "
+            "Invoke-Checked -Command cfn-lint -Arguments @('--version') "
+            "Invoke-Checked -Command uv -Arguments @('--version') "
             "[IO.File]::WriteAllText($installMarker"
         ),
         "scripts/common.psm1": (
@@ -1278,6 +1392,8 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
             "uvicorn==0.51.0\n"
         ),
         "requirements-dev.txt": (
+            "cfn-lint==1.53.0\n"
+            "ruff==0.15.21\n"
             "azure-identity==1.25.3\n"
             "boto3==1.43.51\n"
             "fastapi==0.139.1\n"
