@@ -52,6 +52,8 @@ The coverage command must report at least 80% lines for every hand-authored Pyth
 
 Repository validation also parses every Lambda event-source filter as JSON with duplicate-key rejection and verifies the exact DynamoDB upload-completion event contract. Do not rely on `sam validate` or `cfn-lint` alone: Lambda otherwise rejects malformed filter strings only during event-source-mapping creation.
 
+IDP manifest digests are SHA-256 values over strict UTF-8 text after CRLF and bare CR are normalized to LF. The generator, repository validator, and deployment preflight share that contract, so do not replace it with raw `Get-FileHash` output or update a manifest merely because Git changed checkout line endings.
+
 On an HTTPS-inspected workstation, pass the administrator-approved root CA to
 the container build as an ephemeral BuildKit secret, for example
 `--secret id=enterprise_ca,src=<ignored-local-ca.pem>`. The Dockerfile uses it

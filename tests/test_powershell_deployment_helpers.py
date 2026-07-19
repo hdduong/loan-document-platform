@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -22,6 +23,81 @@ def run_powershell(script: str, *, environment: dict[str, str] | None = None) ->
         env=environment,
     )
     return completed.stdout.strip()
+
+
+def normalized_text_sha256(path: Path) -> str:
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$path = [Environment]::GetEnvironmentVariable('TEST_HASH_PATH'); "
+        "$digest = Get-NormalizedTextSha256 -Path $path; "
+        "[Console]::Out.Write($digest)"
+    )
+    environment = os.environ.copy()
+    environment["TEST_HASH_PATH"] = str(path)
+    return run_powershell(script, environment=environment)
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+def test_normalized_text_sha256_is_stable_across_line_endings(
+    tmp_path: Path, line_ending: str
+) -> None:
+    path = tmp_path / "reviewed.json"
+    path.write_bytes(f'{{"label":"déjà vu"}}{line_ending}'.encode("utf-8"))
+
+    expected = hashlib.sha256('{"label":"déjà vu"}\n'.encode("utf-8")).hexdigest()
+
+    assert normalized_text_sha256(path) == expected
+
+
+def test_normalized_text_sha256_rejects_invalid_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.json"
+    path.write_bytes(b"{\xff}")
+    module_path = str(COMMON_MODULE).replace("'", "''")
+    script = (
+        f"Import-Module -Force '{module_path}'; "
+        "$path = [Environment]::GetEnvironmentVariable('TEST_HASH_PATH'); "
+        "try { Get-NormalizedTextSha256 -Path $path | Out-Null; "
+        "[Console]::Out.Write('accepted') } catch { "
+        "[Console]::Out.Write($_.Exception.Message) }"
+    )
+    environment = os.environ.copy()
+    environment["TEST_HASH_PATH"] = str(path)
+
+    message = run_powershell(script, environment=environment)
+
+    assert "must contain valid UTF-8" in message
+    assert "accepted" not in message
+
+
+def test_normalized_text_sha256_preserves_a_utf8_bom_as_significant(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "reviewed-with-bom.json"
+    path.write_bytes(b'\xef\xbb\xbf{"label":"expected"}\r\n')
+
+    with_bom = hashlib.sha256('\ufeff{"label":"expected"}\n'.encode("utf-8")).hexdigest()
+    without_bom = hashlib.sha256('{"label":"expected"}\n'.encode("utf-8")).hexdigest()
+    actual = normalized_text_sha256(path)
+
+    assert actual == with_bom
+    assert actual != without_bom
+
+
+def test_idp_scripts_share_the_normalized_digest_helper() -> None:
+    common = COMMON_MODULE.read_text(encoding="utf-8")
+    deploy = (ROOT / "scripts" / "deploy-idp.ps1").read_text(encoding="utf-8")
+    generator = (ROOT / "scripts" / "new-screen-config.ps1").read_text(encoding="utf-8")
+    module_import = "Import-Module (Join-Path $PSScriptRoot 'common.psm1') -Force"
+
+    assert "[System.Security.Cryptography.SHA256]::Create()" in common
+    assert "[System.Security.Cryptography.SHA256]::HashData" not in common
+    assert "[System.Convert]::ToHexString" not in common
+    assert module_import in deploy
+    assert "$actual = Get-NormalizedTextSha256 -Path $entry.Path" in deploy
+    assert "Get-FileHash -Algorithm SHA256 -LiteralPath $entry.Path" not in deploy
+    assert module_import in generator
+    assert "function Get-NormalizedTextSha256" not in generator
 
 
 def classify_stack_lookup_error(error_text: str) -> bool:

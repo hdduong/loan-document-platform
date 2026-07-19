@@ -5,6 +5,27 @@ function Get-ProjectRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 }
 
+function Get-NormalizedTextSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    try {
+        $text = $strictUtf8.GetString([System.IO.File]::ReadAllBytes($resolved))
+    } catch [System.Text.DecoderFallbackException] {
+        throw "Reviewed text file '$resolved' must contain valid UTF-8."
+    }
+    $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $algorithm.ComputeHash($strictUtf8.GetBytes($normalized))
+    } finally {
+        $algorithm.Dispose()
+    }
+    return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+}
+
 function Read-EnvironmentConfig {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
@@ -446,4 +467,4 @@ function Get-StackOutputs {
     return $result
 }
 
-Export-ModuleMember -Function Get-ProjectRoot, Read-EnvironmentConfig, Assert-Command, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
+Export-ModuleMember -Function Get-ProjectRoot, Get-NormalizedTextSha256, Read-EnvironmentConfig, Assert-Command, Invoke-AzureCli, Invoke-Aws, Assert-AwsIdentity, Test-AwsCloudFormationStackNotFound, Get-AwsCloudFormationStackDescription, Assert-AwsStatefulStackPolicy, Set-AwsStatefulStackPolicy, Get-StackOutputs
