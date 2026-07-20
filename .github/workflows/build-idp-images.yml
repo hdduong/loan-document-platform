@@ -1,0 +1,520 @@
+name: Build AWS IDP images
+
+on:
+  pull_request:
+    paths:
+      - 'config/idp/images.json'
+      - 'contracts/schemas/idp-image-release.schema.json'
+      - 'tooling/**'
+      - 'vendor/idp.lock.json'
+      - 'vendor/patches/**'
+      - '.github/workflows/build-idp-images.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Protected environment that owns the image repository
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      confirmation:
+        description: Type BUILD IDP IMAGES exactly
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: idp-image-release-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: validate-release-input
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Verify reviewed release intent
+        shell: pwsh
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -ceq 'workflow_dispatch' -and $env:CONFIRMATION -cne 'BUILD IDP IMAGES') {
+            throw 'Image-build confirmation did not match BUILD IDP IMAGES.'
+          }
+          if ($env:GITHUB_EVENT_NAME -ceq 'workflow_dispatch' -and $env:GITHUB_REF -cne 'refs/heads/main') {
+            throw "IDP images may be published only from main; received $env:GITHUB_REF."
+          }
+
+      - name: Check out reviewed platform source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install pinned manifest dependency
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+
+      - name: Validate lock and emit exact 15-image matrix
+        id: matrix
+        shell: pwsh
+        run: |
+          $arguments = @(
+            '-m', 'tooling.idp_images', 'emit-github-matrix',
+            '--contract', 'config/idp/images.json',
+            '--lock', 'vendor/idp.lock.json',
+            '--github-output', $env:GITHUB_OUTPUT
+          )
+          & python @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  build:
+    name: build-${{ matrix.logicalName }}
+    if: github.event_name == 'workflow_dispatch'
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      IMAGE_REPOSITORY_URI: ${{ vars.AWS_IDP_IMAGE_REPOSITORY_URI }}
+      IMAGE_TAG: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.logicalName }}
+    steps:
+      - name: Check out reviewed platform source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install pinned manifest dependency
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+
+      - name: Configure short-lived image publication credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_IDP_IMAGE_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: idp-image-${{ github.run_id }}-${{ strategy.job-index }}
+          role-duration-seconds: 3600
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Sign in to private ECR
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.0.1
+        with:
+          mask-password: true
+
+      - name: Clone and verify pinned AWS IDP source
+        shell: pwsh
+        run: |
+          $lock = Get-Content -Raw -LiteralPath 'vendor/idp.lock.json' | ConvertFrom-Json -Depth 20
+          $cloneArguments = @(
+            'clone', '--branch', [string]$lock.tag, '--depth', '1', '--single-branch',
+            [string]$lock.repository, '.idp-source'
+          )
+          & git @cloneArguments
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to clone the pinned AWS IDP source.' }
+          $commit = (& git -C .idp-source rev-parse HEAD | Out-String).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $commit -cne [string]$lock.commit) {
+            throw 'Cloned AWS IDP source does not match vendor/idp.lock.json.'
+          }
+          $validateArguments = @(
+            '-m', 'tooling.idp_images', 'validate-contract',
+            '--contract', 'config/idp/images.json',
+            '--lock', 'vendor/idp.lock.json',
+            '--source-root', '.idp-source'
+          )
+          & python @validateArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patchPath = Join-Path $env:GITHUB_WORKSPACE ([string]$lock.externalImageOverlay.path)
+          & git -C .idp-source apply --check --whitespace=error-all $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'The reviewed external-image overlay no longer applies.' }
+          & git -C .idp-source apply --whitespace=error-all $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the reviewed external-image overlay.' }
+          $changed = @(& git -C .idp-source diff --name-only --) | Sort-Object
+          $expected = @('Dockerfile.optimized', 'patterns/unified/template.yaml', 'template.yaml') | Sort-Object
+          if (($changed -join "`n") -cne ($expected -join "`n")) {
+            throw "External-image overlay touched unexpected files: $($changed -join ', ')."
+          }
+
+      - name: Install checksum-pinned Trivy scanner
+        shell: pwsh
+        run: ./scripts/install-trivy.ps1
+
+      - name: Set up pinned QEMU emulation
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+          cache-image: false
+
+      - name: Set up pinned Buildx builder
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: image=moby/buildkit@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+          install: true
+
+      - name: Build and push immutable ARM64 image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.18.0
+        with:
+          context: .idp-source
+          file: .idp-source/Dockerfile.optimized
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY_URI }}:${{ env.IMAGE_TAG }}
+          provenance: false
+          sbom: false
+          build-args: |
+            FUNCTION_PATH=${{ matrix.sourcePath }}
+            BASE_IMAGE_SUFFIX=arm64
+            INSTALL_GIT=${{ matrix.installGit }}
+          cache-from: type=gha,scope=idp-${{ matrix.logicalName }}
+          cache-to: type=gha,mode=max,scope=idp-${{ matrix.logicalName }}
+
+      - name: Verify pushed image subject and architecture
+        id: inspect
+        shell: pwsh
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if ($env:IMAGE_DIGEST -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            throw 'Build action did not return an immutable sha256 digest.'
+          }
+          $slash = $env:IMAGE_REPOSITORY_URI.IndexOf('/')
+          if ($slash -lt 1) { throw 'Protected ECR repository URI is invalid.' }
+          $repositoryName = $env:IMAGE_REPOSITORY_URI.Substring($slash + 1)
+          $awsArguments = @(
+            'ecr', 'batch-get-image',
+            '--repository-name', $repositoryName,
+            '--image-ids', "imageDigest=$env:IMAGE_DIGEST",
+            '--accepted-media-types',
+            'application/vnd.docker.distribution.manifest.v2+json',
+            'application/vnd.oci.image.manifest.v1+json',
+            '--output', 'json', '--no-cli-pager'
+          )
+          $response = (& aws @awsArguments | Out-String) | ConvertFrom-Json -Depth 30
+          if ($LASTEXITCODE -ne 0 -or @($response.images).Count -ne 1) {
+            throw 'The pushed digest could not be resolved as one image manifest.'
+          }
+          $mediaType = [string]$response.images[0].imageManifestMediaType
+          if ($mediaType -notin @(
+            'application/vnd.docker.distribution.manifest.v2+json',
+            'application/vnd.oci.image.manifest.v1+json'
+          )) {
+            throw "Lambda-incompatible image media type: $mediaType"
+          }
+          $imageUri = "$env:IMAGE_REPOSITORY_URI@$env:IMAGE_DIGEST"
+          & docker pull --platform linux/arm64 $imageUri | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to pull the pushed ARM64 image by digest.' }
+          $inspection = (& docker image inspect $imageUri | Out-String) | ConvertFrom-Json -Depth 20
+          if ($LASTEXITCODE -ne 0 -or $inspection[0].Architecture -cne 'arm64' -or $inspection[0].Os -cne 'linux') {
+            throw 'The pushed image is not a single Linux ARM64 image.'
+          }
+          "media_type=$mediaType" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "completed_at=$([DateTimeOffset]::UtcNow.ToString('o'))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Scan digest and generate CycloneDX SBOM
+        shell: pwsh
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          $directory = Join-Path $env:GITHUB_WORKSPACE '.release'
+          [IO.Directory]::CreateDirectory((Join-Path $directory 'scan')) | Out-Null
+          [IO.Directory]::CreateDirectory((Join-Path $directory 'sbom')) | Out-Null
+          $imageUri = "$env:IMAGE_REPOSITORY_URI@$env:IMAGE_DIGEST"
+          $scanPath = Join-Path $directory "scan/${{ matrix.logicalName }}.json"
+          $sbomPath = Join-Path $directory "sbom/${{ matrix.logicalName }}.cdx.json"
+          & trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 --format json --output $scanPath $imageUri
+          if ($LASTEXITCODE -ne 0) { throw 'Image contains an unapproved fixed HIGH or CRITICAL vulnerability.' }
+          & trivy image --scanners vuln --format cyclonedx --output $sbomPath $imageUri
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to generate the image SBOM.' }
+
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.0.0
+        with:
+          subject-name: ${{ env.IMAGE_REPOSITORY_URI }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: false
+
+      - name: Attest CycloneDX SBOM
+        id: sbom
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE_REPOSITORY_URI }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: .release/sbom/${{ matrix.logicalName }}.cdx.json
+          push-to-registry: false
+
+      - name: Write checked image evidence fragment
+        shell: pwsh
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          MEDIA_TYPE: ${{ steps.inspect.outputs.media_type }}
+          SCAN_COMPLETED_AT: ${{ steps.inspect.outputs.completed_at }}
+          PROVENANCE_URL: ${{ steps.provenance.outputs.attestation-url }}
+          SBOM_URL: ${{ steps.sbom.outputs.attestation-url }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom.outputs.bundle-path }}
+        run: |
+          $fragmentDirectory = Join-Path $env:GITHUB_WORKSPACE '.release/fragments'
+          [IO.Directory]::CreateDirectory($fragmentDirectory) | Out-Null
+          $attestationDirectory = Join-Path $env:GITHUB_WORKSPACE '.release/attestations'
+          [IO.Directory]::CreateDirectory($attestationDirectory) | Out-Null
+          Copy-Item -LiteralPath $env:PROVENANCE_BUNDLE -Destination (Join-Path $attestationDirectory '${{ matrix.logicalName }}-provenance.jsonl')
+          Copy-Item -LiteralPath $env:SBOM_BUNDLE -Destination (Join-Path $attestationDirectory '${{ matrix.logicalName }}-sbom.jsonl')
+          $arguments = @(
+            '-m', 'tooling.idp_images', 'write-fragment',
+            '--contract', 'config/idp/images.json',
+            '--lock', 'vendor/idp.lock.json',
+            '--output', ".release/fragments/${{ matrix.logicalName }}.json",
+            '--logical-name', '${{ matrix.logicalName }}',
+            '--repository-uri', $env:IMAGE_REPOSITORY_URI,
+            '--tag', $env:IMAGE_TAG,
+            '--digest', $env:IMAGE_DIGEST,
+            '--media-type', $env:MEDIA_TYPE,
+            '--scanner-version', '0.72.0',
+            '--scan-report', ".release/scan/${{ matrix.logicalName }}.json",
+            '--scan-completed-at', $env:SCAN_COMPLETED_AT,
+            '--provenance-url', $env:PROVENANCE_URL,
+            '--provenance-predicate-type', 'https://slsa.dev/provenance/v1',
+            '--sbom', ".release/sbom/${{ matrix.logicalName }}.cdx.json",
+            '--sbom-url', $env:SBOM_URL,
+            '--sbom-predicate-type', 'https://cyclonedx.org/bom'
+          )
+          & python @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload immutable per-image evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: idp-image-${{ matrix.logicalName }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .release/fragments/${{ matrix.logicalName }}.json
+            .release/scan/${{ matrix.logicalName }}.json
+            .release/sbom/${{ matrix.logicalName }}.cdx.json
+            .release/attestations/${{ matrix.logicalName }}-provenance.jsonl
+            .release/attestations/${{ matrix.logicalName }}-sbom.jsonl
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 6
+
+  build-pr:
+    name: validate-${{ matrix.logicalName }}
+    if: github.event_name == 'pull_request'
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Check out reviewed platform source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+      - name: Install pinned manifest dependency
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Clone and verify pinned AWS IDP source
+        shell: pwsh
+        run: |
+          $lock = Get-Content -Raw -LiteralPath 'vendor/idp.lock.json' | ConvertFrom-Json -Depth 20
+          & git clone --branch $lock.tag --depth 1 --single-branch $lock.repository .idp-source
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to clone the pinned AWS IDP source.' }
+          if ((& git -C .idp-source rev-parse HEAD | Out-String).Trim().ToLowerInvariant() -cne [string]$lock.commit) { throw 'Pinned AWS IDP source commit mismatch.' }
+          & python -m tooling.idp_images validate-contract --contract config/idp/images.json --lock vendor/idp.lock.json --source-root .idp-source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & git -C .idp-source apply --check --whitespace=error-all (Join-Path $env:GITHUB_WORKSPACE $lock.externalImageOverlay.path)
+          if ($LASTEXITCODE -ne 0) { throw 'The reviewed external-image overlay no longer applies.' }
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build without registry credentials
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .idp-source
+          file: .idp-source/Dockerfile.optimized
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: idp-pr/${{ matrix.logicalName }}:${{ github.sha }}
+          provenance: false
+          sbom: false
+          build-args: |
+            FUNCTION_PATH=${{ matrix.sourcePath }}
+            BASE_IMAGE_SUFFIX=arm64
+            INSTALL_GIT=${{ matrix.installGit }}
+      - name: Install checksum-pinned Trivy scanner
+        shell: pwsh
+        run: ./scripts/install-trivy.ps1
+      - name: Scan PR image
+        shell: bash
+        run: trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 "idp-pr/${{ matrix.logicalName }}:${{ github.sha }}"
+
+  publish-manifest:
+    name: publish-complete-release-manifest
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      release-id: ${{ steps.publish.outputs.release_id }}
+      manifest-key: ${{ steps.publish.outputs.manifest_key }}
+      manifest-version-id: ${{ steps.publish.outputs.manifest_version_id }}
+      manifest-sha256: ${{ steps.publish.outputs.manifest_sha256 }}
+    steps:
+      - name: Check out reviewed platform source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install pinned manifest dependency
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+
+      - name: Download all 15 checked evidence artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: idp-image-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release
+          merge-multiple: true
+
+      - name: Configure short-lived manifest publication credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_IDP_IMAGE_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: idp-manifest-${{ github.run_id }}
+          role-duration-seconds: 3600
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Assemble, validate, and publish complete release manifest
+        id: publish
+        shell: pwsh
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          IMAGE_REPOSITORY_URI: ${{ vars.AWS_IDP_IMAGE_REPOSITORY_URI }}
+          ARTIFACT_BUCKET: ${{ vars.AWS_ARTIFACT_BUCKET }}
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          $releaseId = "$env:TARGET_ENVIRONMENT-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$($env:GITHUB_SHA.Substring(0, 12))"
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE '.release/idp-image-release.json'
+          $checksumPath = Join-Path $env:GITHUB_WORKSPACE '.release/idp-image-release.sha256'
+          $arguments = @(
+            '-m', 'tooling.idp_images', 'assemble-release',
+            '--contract', 'config/idp/images.json',
+            '--lock', 'vendor/idp.lock.json',
+            '--schema', 'contracts/schemas/idp-image-release.schema.json',
+            '--fragments', '.release/fragments',
+            '--output', $manifestPath,
+            '--checksum-output', $checksumPath,
+            '--release-id', $releaseId,
+            '--environment', $env:TARGET_ENVIRONMENT,
+            '--account', $env:AWS_ACCOUNT_ID,
+            '--region', $env:AWS_REGION,
+            '--repository-uri', $env:IMAGE_REPOSITORY_URI,
+            '--platform-commit', $env:GITHUB_SHA,
+            '--workflow-repository', $env:GITHUB_REPOSITORY,
+            '--workflow-ref', $env:GITHUB_REF,
+            '--workflow-run-id', $env:GITHUB_RUN_ID,
+            '--workflow-run-attempt', $env:GITHUB_RUN_ATTEMPT,
+            '--workflow-run-url', "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            '--actor', $env:GITHUB_ACTOR
+          )
+          & python @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifestKey = "idp-images/$env:TARGET_ENVIRONMENT/releases/$releaseId/manifest.json"
+          $checksumKey = "idp-images/$env:TARGET_ENVIRONMENT/releases/$releaseId/manifest.sha256"
+          $putArguments = @(
+            's3api', 'put-object', '--bucket', $env:ARTIFACT_BUCKET,
+            '--key', $manifestKey, '--body', $manifestPath,
+            '--content-type', 'application/json', '--output', 'json', '--no-cli-pager'
+          )
+          $putResponse = (& aws @putArguments | Out-String) | ConvertFrom-Json -Depth 20
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$putResponse.VersionId)) {
+            throw 'Failed to publish the versioned complete image manifest.'
+          }
+          $checksumArguments = @(
+            's3api', 'put-object', '--bucket', $env:ARTIFACT_BUCKET,
+            '--key', $checksumKey, '--body', $checksumPath,
+            '--content-type', 'text/plain', '--output', 'json', '--no-cli-pager'
+          )
+          & aws @checksumArguments | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to publish the image manifest checksum.' }
+
+          "release_id=$releaseId" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_key=$manifestKey" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_version_id=$($putResponse.VersionId)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_sha256=$manifestSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          @"
+          ## Complete AWS IDP image release
+
+          - Release: ``$releaseId``
+          - Protected manifest key: ``$manifestKey``
+          - S3 VersionId: ``$($putResponse.VersionId)``
+          - SHA-256: ``$manifestSha``
+          - Images: 15 Linux ARM64 digests
+
+          Deployment remains a separate reviewed action and must select this exact key, VersionId, and checksum.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Upload complete release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: idp-image-release-${{ steps.publish.outputs.release_id }}
+          path: |
+            .release/idp-image-release.json
+            .release/idp-image-release.sha256
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9

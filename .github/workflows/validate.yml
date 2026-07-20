@@ -45,7 +45,7 @@ jobs:
 
       - name: Run Python tests with coverage
         run: |
-          pytest -q --cov=services --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
+          pytest -q --cov=services --cov=tooling --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
           python scripts/check-python-coverage.py coverage.json
 
       - name: Validate OpenAPI

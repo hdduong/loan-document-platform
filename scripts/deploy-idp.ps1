@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$EnvironmentFile,
+    [Parameter(Mandatory)][string]$ImageManifestFile,
     [switch]$ReinstallCli,
     [switch]$CleanBuild
 )
@@ -24,11 +25,25 @@ $root = Get-ProjectRoot
 $lockPath = Join-Path $root 'vendor/idp.lock.json'
 $lock = Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json -Depth 10
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $root 'config/idp/manifest.json') | ConvertFrom-Json -Depth 10
+$imageContractPath = Join-Path $root 'config/idp/images.json'
+$imageReleaseSchemaPath = Join-Path $root 'contracts/schemas/idp-image-release.schema.json'
+$resolvedImageManifestPath = (Resolve-Path -LiteralPath $ImageManifestFile).Path
+$imageParametersPath = Join-Path $root ".local/idp-image-parameters-$($config.environment).json"
 
 if ($lock.version -ne $config.idpVersion -or $lock.commit -ne $config.idpCommit) {
     throw 'Environment IDP version/commit does not match vendor/idp.lock.json.'
 }
 if ($lock.deploymentMode -ne 'headless') { throw 'The committed IDP lock must specify headless deployment mode.' }
+if ($null -eq $lock.externalImageOverlay) {
+    throw 'The committed IDP lock must pin the reviewed external-image overlay.'
+}
+$overlayPath = Join-Path $root ([string]$lock.externalImageOverlay.path)
+if ((Get-NormalizedTextSha256 -Path $overlayPath) -cne [string]$lock.externalImageOverlay.sha256) {
+    throw 'The reviewed external-image overlay checksum does not match vendor/idp.lock.json.'
+}
+if ((Get-NormalizedTextSha256 -Path $imageContractPath) -cne [string]$lock.externalImageOverlay.imageContractSha256) {
+    throw 'The reviewed image contract checksum does not match vendor/idp.lock.json.'
+}
 if ([string]$lock.cliPythonVersion -cne '3.12') {
     throw 'The reviewed IDP 0.5.16 CLI dependency set requires Python 3.12.'
 }
@@ -43,6 +58,7 @@ foreach ($name in $reviewedBuildTools.Keys) {
     }
 }
 $pythonRuntimeTag = ([string]$lock.cliPythonVersion).Replace('.', '')
+$platformPython = Resolve-PythonLaunch -Version '3.13'
 $venvDirectory = Join-Path $root ".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"
 $venvExecutableDirectory = if ($IsWindows) {
     Join-Path $venvDirectory 'Scripts'
@@ -50,10 +66,37 @@ $venvExecutableDirectory = if ($IsWindows) {
     Join-Path $venvDirectory 'bin'
 }
 
-foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm') {
+foreach ($command in 'aws', 'git', 'sam', 'node', 'npm') {
     Assert-Command -Name $command -InstallHint "Install '$command' before building the pinned IDP source."
 }
 $idpPython = Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)
+
+function Invoke-ImageReleaseValidation {
+    param([string[]]$AdditionalArguments = @())
+
+    $arguments = @($platformPython.PrefixArguments) + @(
+        '-m', 'tooling.idp_images', 'validate-release',
+        '--contract', $imageContractPath,
+        '--lock', $lockPath,
+        '--schema', $imageReleaseSchemaPath,
+        '--manifest', $resolvedImageManifestPath,
+        '--environment', [string]$config.environment,
+        '--workflow-repository', "$($config.githubOwner)/$($config.repositoryName)",
+        '--workflow-ref', "refs/heads/$($config.githubDefaultBranch)"
+    ) + $AdditionalArguments
+    Push-Location $root
+    try {
+        Invoke-Checked `
+            -Command $platformPython.FilePath `
+            -Arguments $arguments `
+            -FailureMessage 'IDP image release validation failed.'
+    } finally {
+        Pop-Location
+    }
+}
+
+# Validate schema, source lock, inventory, scans, and attestations before any cloud call.
+Invoke-ImageReleaseValidation
 $windowsCliBridge = $null
 if ($IsWindows) {
     $samCommandSource = Resolve-CommandSourceOutsidePath -Name sam -ExcludedDirectory $venvExecutableDirectory
@@ -70,7 +113,8 @@ $bootstrap = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsReg
 foreach ($requiredOutput in @(
     'ArtifactBucketName',
     'IdpCloudFormationExecutionRoleArn',
-    'IdpRolePermissionsBoundaryArn'
+    'IdpRolePermissionsBoundaryArn',
+    'IdpImageRepositoryUri'
 )) {
     if (-not $bootstrap.ContainsKey($requiredOutput)) {
         throw "Bootstrap stack '$($config.bootstrapStackName)' is missing '$requiredOutput'."
@@ -81,6 +125,20 @@ if (-not $bootstrap.ArtifactBucketName.EndsWith($artifactSuffix, [StringComparis
     throw "Artifact bucket '$($bootstrap.ArtifactBucketName)' must end in '$artifactSuffix' for pinned idp-cli publishing. Re-deploy the bootstrap stack with the repository convention."
 }
 $artifactBucketBaseName = $bootstrap.ArtifactBucketName.Substring(0, $bootstrap.ArtifactBucketName.Length - $artifactSuffix.Length)
+
+$localDirectory = Join-Path $root '.local'
+[IO.Directory]::CreateDirectory($localDirectory) | Out-Null
+Invoke-ImageReleaseValidation -AdditionalArguments @(
+    '--account', [string]$config.awsAccountId,
+    '--region', [string]$config.awsRegion,
+    '--repository-uri', [string]$bootstrap.IdpImageRepositoryUri,
+    '--parameters-output', $imageParametersPath
+)
+$imageRelease = Get-Content -Raw -LiteralPath $resolvedImageManifestPath | ConvertFrom-Json -Depth 30
+$imageParameters = Get-Content -Raw -LiteralPath $imageParametersPath | ConvertFrom-Json -Depth 10 -AsHashtable
+if ($imageParameters.Count -ne 16 -or -not $imageParameters.ContainsKey('IdpImageRepositoryUri')) {
+    throw 'Validated IDP image release did not produce the expected repository plus 15 digest parameters.'
+}
 
 $platform = Get-StackOutputs -Profile $config.awsProfile -Region $config.awsRegion -StackName $config.platformStackName
 if (-not $platform.IdpPostprocessorFunctionArn) {
@@ -125,6 +183,39 @@ if ($sourceCommit -ne $lock.commit) {
 if ($sourceCommit -ne $lock.commit) { throw "Checked-out IDP commit '$sourceCommit' does not match lock '$($lock.commit)'." }
 & git -C $vendorDirectory diff --quiet --exit-code
 if ($LASTEXITCODE -ne 0) { throw 'Pinned IDP source has tracked local modifications; refusing a production build.' }
+
+$buildRoot = [IO.Path]::GetFullPath((Join-Path $root '.idp-build'))
+$buildDirectory = [IO.Path]::GetFullPath((Join-Path $buildRoot "idp-$($lock.version)-external-images"))
+$requiredPrefix = $buildRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+if (-not $buildDirectory.StartsWith($requiredPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Resolved disposable IDP build path escaped the repository build directory.'
+}
+if (Test-Path -LiteralPath $buildDirectory) {
+    [IO.Directory]::Delete($buildDirectory, $true)
+}
+[IO.Directory]::CreateDirectory($buildRoot) | Out-Null
+Invoke-Checked -Command git -Arguments @(
+    'clone', '--quiet', '--no-hardlinks', $vendorDirectory, $buildDirectory
+) -FailureMessage 'Failed to create the disposable pinned IDP build copy.'
+$buildCommit = (& git -C $buildDirectory rev-parse HEAD | Out-String).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $buildCommit -cne [string]$lock.commit) {
+    throw 'Disposable IDP build copy does not match the locked upstream commit.'
+}
+Invoke-Checked -Command git -Arguments @(
+    '-C', $buildDirectory, 'apply', '--check', '--whitespace=error-all', $overlayPath
+) -FailureMessage 'The reviewed external-image overlay no longer applies cleanly.'
+Invoke-Checked -Command git -Arguments @(
+    '-C', $buildDirectory, 'apply', '--whitespace=error-all', $overlayPath
+) -FailureMessage 'Failed to apply the reviewed external-image overlay.'
+Invoke-Checked -Command git -Arguments @(
+    '-C', $buildDirectory, 'diff', '--check'
+) -FailureMessage 'The reviewed external-image overlay introduced invalid whitespace.'
+$actualOverlayFiles = @(& git -C $buildDirectory diff --name-only --) | Sort-Object
+if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the applied external-image overlay.' }
+$expectedOverlayFiles = @('Dockerfile.optimized', 'patterns/unified/template.yaml', 'template.yaml') | Sort-Object
+if (($actualOverlayFiles -join "`n") -cne ($expectedOverlayFiles -join "`n")) {
+    throw "External-image overlay touched unexpected files: $($actualOverlayFiles -join ', ')."
+}
 
 $pythonExecutable = if ($IsWindows) {
     Join-Path $venvDirectory 'Scripts/python.exe'
@@ -243,20 +334,30 @@ if ($installRequired) {
 }
 
 Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment -ScriptBlock {
-    Invoke-Checked -Command docker -Arguments @('info') -FailureMessage 'Docker is required and must be running for a pinned source IDP build.'
 $cliPrefix = @('-m', 'idp_cli.cli')
 if ($env:GITHUB_ACTIONS -ne 'true') { $cliPrefix += @('--profile', $config.awsProfile) }
+$idpParameterPairs = @(
+    "PostProcessingLambdaHookFunctionArn=$($platform.IdpPostprocessorFunctionArn)",
+    "PermissionsBoundaryArn=$($bootstrap.IdpRolePermissionsBoundaryArn)",
+    'LambdaArchitecture=arm64'
+)
+foreach ($entry in @($imageParameters.GetEnumerator() | Sort-Object Key)) {
+    if ([string]$entry.Key -cnotmatch '^[A-Z][A-Za-z0-9]+$' -or [string]$entry.Value -match ',') {
+        throw 'Validated IDP image parameters contain an unsafe name or value.'
+    }
+    $idpParameterPairs += "$($entry.Key)=$($entry.Value)"
+}
 $deployArguments = $cliPrefix + @(
     'deploy',
     '--stack-name', $config.idpStackName,
     '--region', $config.awsRegion,
-    '--from-code', $vendorDirectory,
+    '--from-code', $buildDirectory,
     '--headless',
     '--admin-email', $config.alertEmail,
     '--custom-config', $screenPath,
     '--max-concurrent', '10',
     '--log-level', 'INFO',
-    '--parameters', "PostProcessingLambdaHookFunctionArn=$($platform.IdpPostprocessorFunctionArn),PermissionsBoundaryArn=$($bootstrap.IdpRolePermissionsBoundaryArn)",
+    '--parameters', ($idpParameterPairs -join ','),
     '--role-arn', $bootstrap.IdpCloudFormationExecutionRoleArn,
     '--bucket-basename', $artifactBucketBaseName,
     '--prefix', "idp/$($lock.version)",
@@ -312,9 +413,11 @@ $working = Invoke-Aws -Profile $config.awsProfile -Region $config.awsRegion -Arg
     '--stack-name', $config.idpStackName,
     '--logical-resource-id', 'WorkingBucket'
 ) -CaptureJson
-$localDirectory = Join-Path $root '.local'
-[IO.Directory]::CreateDirectory($localDirectory) | Out-Null
 $outputPath = Join-Path $localDirectory "idp-$($config.environment).json"
+$selectedImages = [ordered]@{}
+foreach ($image in @($imageRelease.images | Sort-Object logicalName)) {
+    $selectedImages[[string]$image.logicalName] = [string]$image.digest
+}
 $safeOutput = [ordered]@{
     stackName = $config.idpStackName
     region = $config.awsRegion
@@ -328,6 +431,15 @@ $safeOutput = [ordered]@{
     stateMachineArn = $outputs.StateMachineArn
     screenConfigVersion = $manifest.screen.name
     fullConfigVersion = $manifest.full.name
+    imageRelease = [ordered]@{
+        releaseId = [string]$imageRelease.releaseId
+        manifestFileName = [IO.Path]::GetFileName($resolvedImageManifestPath)
+        manifestSha256 = Get-NormalizedTextSha256 -Path $resolvedImageManifestPath
+        platformCommit = [string]$imageRelease.source.platformCommit
+        workflowRunUrl = [string]$imageRelease.workflow.runUrl
+        repositoryUri = [string]$imageRelease.aws.repositoryUri
+        images = $selectedImages
+    }
 }
 [IO.File]::WriteAllText($outputPath, ($safeOutput | ConvertTo-Json -Depth 10) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 Write-Host "Pinned headless IDP ready. Non-secret outputs: $outputPath"

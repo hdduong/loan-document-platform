@@ -1081,7 +1081,6 @@ def validate_idp_python_toolchain_contract(
     )
     for fragment in (
         "Resolve-PythonLaunch -Version ([string]$lock.cliPythonVersion)",
-        "foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm')",
         '".local/tools/idp-cli-$($lock.version)-py$pythonRuntimeTag"',
         "lib/idp_common_pkg')[all]",
         "'-m', 'pip', 'check'",
@@ -1103,6 +1102,15 @@ def validate_idp_python_toolchain_contract(
         "Invoke-WithPrependedPath -Path $venvExecutableDirectory -Environment $cliEnvironment",
     ):
         require(fragment in deploy_script, f"Pinned IDP Python gate lacks: {fragment}")
+    legacy_command_fragment = "foreach ($command in 'aws', 'git', 'sam', 'docker', 'node', 'npm')"
+    if "ImageManifestFile" in deploy_script:
+        require(legacy_command_fragment not in deploy_script, "IDP deployment must not require Docker for GitHub-built images.")
+    else:
+        require(
+            "foreach ($command in 'aws', 'git', 'sam', 'node', 'npm')" in deploy_script
+            or legacy_command_fragment in deploy_script,
+            "Pinned IDP Python gate lacks its command preflight.",
+        )
     require(
         "foreach ($command in 'aws', 'git', 'python'," not in deploy_script,
         "IDP deployment must not require generic Python before exact-minor resolution.",
@@ -1300,11 +1308,11 @@ def validate_python_quality_gate() -> None:
     coverage = project.get("tool", {}).get("coverage", {})
     run = coverage.get("run", {})
     require(run.get("branch") is True, "Python coverage must collect branch data.")
-    require(run.get("source") == ["services"], "Python coverage must include every service module.")
+    require(run.get("source") == ["services", "tooling"], "Python coverage must include every service and tooling module.")
 
     checker = (ROOT / "scripts" / "check-python-coverage.py").read_text(encoding="utf-8")
     require("MINIMUM_LINE_COVERAGE = 80.0" in checker, "Python per-file coverage floor changed.")
-    require("PRODUCTION_ROOT = PurePosixPath(\"services\")" in checker, "Python coverage scope changed.")
+    require("PRODUCTION_ROOTS = (PurePosixPath(\"services\"), PurePosixPath(\"tooling\"))" in checker, "Python coverage scope changed.")
 
     for workflow_name in ("validate.yml", "deploy-prod.yml"):
         workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
@@ -1379,9 +1387,10 @@ def validate_azure_control_plane() -> None:
     """Keep Azure as the sole public API and AWS as a private headless data plane."""
 
     feature = load_json(ROOT / ".specify" / "feature.json")
+    active_feature_path = feature.get("feature_directory")
     require(
-        feature.get("feature_directory") == "specs/002-azure-api-control-plane",
-        "The Azure API control-plane packet must remain the active feature.",
+        isinstance(active_feature_path, str) and active_feature_path.startswith("specs/"),
+        "The active feature must remain under specs/ while Azure control-plane invariants are checked.",
     )
 
     for relative_path in (

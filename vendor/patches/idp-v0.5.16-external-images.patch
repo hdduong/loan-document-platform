@@ -1,0 +1,827 @@
+diff --git a/Dockerfile.optimized b/Dockerfile.optimized
+index 510fcaa..764b6aa 100644
+--- a/Dockerfile.optimized
++++ b/Dockerfile.optimized
+@@ -8,10 +8,10 @@
+ ARG BASE_IMAGE_SUFFIX=arm64
+ 
+ # Use specific version to avoid network issues
+-FROM ghcr.io/astral-sh/uv:0.9.6 AS uv
++FROM ghcr.io/astral-sh/uv:0.9.6@sha256:4b96ee9429583983fd172c33a02ecac5242d63fb46bc27804748e38c1cc9ad0d AS uv
+ 
+ # Builder stage - bundle dependencies into Lambda task root
+-FROM public.ecr.aws/lambda/python:3.12-${BASE_IMAGE_SUFFIX} AS builder
++FROM public.ecr.aws/lambda/python:3.12-${BASE_IMAGE_SUFFIX}@sha256:19430f65b9275fbedfd184570892d4399b56d52ddac84cd6aa73afb6fe3dcd78 AS builder
+ 
+ # Enable bytecode compilation to improve cold-start performance
+ ENV UV_COMPILE_BYTECODE=1
+@@ -46,7 +46,7 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
+   rm -rf /tmp/idp_common_pkg
+ 
+ # Final stage - minimal runtime
+-FROM public.ecr.aws/lambda/python:3.12-${BASE_IMAGE_SUFFIX}
++FROM public.ecr.aws/lambda/python:3.12-${BASE_IMAGE_SUFFIX}@sha256:19430f65b9275fbedfd184570892d4399b56d52ddac84cd6aa73afb6fe3dcd78
+ 
+ # Conditionally install git (required for mlflow/gitpython)
+ ARG INSTALL_GIT=false
+diff --git a/patterns/unified/template.yaml b/patterns/unified/template.yaml
+index ff22b13..fc2bef1 100644
+--- a/patterns/unified/template.yaml
++++ b/patterns/unified/template.yaml
+@@ -133,9 +133,56 @@ Parameters:
+     Type: String
+     Description: "Name of Lambda function to save evaluation metrics"
+ 
+-  ImageVersion:
++  IdpImageRepositoryUri:
+     Type: String
+-    Description: "Content-based version for Lambda container images"
++    AllowedPattern: "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com(?:\\.cn)?/[a-z0-9][a-z0-9._/-]*$"
++    Description: "Bootstrap-owned private ECR repository URI"
++
++  BdaInvokeImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  BdaCompletionImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  BdaProcessResultsImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  OcrImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  ClassificationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  ExtractionImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  AssessmentImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  ProcessResultsImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  SummarizationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  EvaluationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  TestExecutionAggregationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  RuleValidationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  RuleValidationOrchestrationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  MlflowLoggerImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  RuleValidationPolicyClassificationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
+ 
+   LambdaArchitecture:
+     Type: String
+@@ -146,26 +193,6 @@ Parameters:
+       used in the Docker build. Use arm64 (Graviton) for best price-performance
+       or x86_64 when using custom base images that only support AMD64.
+ 
+-  ArtifactBucket:
+-    Type: String
+-    Description: "S3 bucket containing deployment artifacts"
+-
+-  ArtifactsBucketKmsKeyArn:
+-    Type: String
+-    Default: ""
+-    Description: >-
+-      (Optional) KMS CMK ARN used to encrypt the artifacts bucket. When provided,
+-      the DockerBuildRole and other CodeBuild roles receive kms:Decrypt permission.
+-    AllowedPattern: "^(|arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+)$"
+-
+-  ArtifactPrefix:
+-    Type: String
+-    Description: "S3 prefix for deployment artifacts"
+-
+-  SourceZipfile:
+-    Type: String
+-    Description: "Name of the unified source code zipfile in S3"
+-
+   BedrockModelId:
+     Type: String
+     Description: "Bedrock model id to use for label extraction"
+@@ -185,12 +212,6 @@ Parameters:
+     AllowedPattern: "^(|arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+)$"
+     ConstraintDescription: Must be empty or a valid IAM policy ARN
+ 
+-  EnableECRImageScanning:
+-    Type: String
+-    Default: 'true'
+-    AllowedValues: ['true', 'false']
+-    Description: Enable automatic vulnerability scanning for Lambda container images in ECR
+-
+   CustomClassificationModelARN:
+     Type: String
+     Default: ""
+@@ -256,10 +277,8 @@ Conditions:
+     !Not [!Equals [!Ref CustomExtractionModelARN, ""]]
+   HasPermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
+   HasAppSyncApi: !Not [!Equals [!Ref AppSyncApiArn, ""]]
+-  IsECRImageScanningEnabled: !Equals [!Ref EnableECRImageScanning, "true"]
+   IsPrivateAppSync: !Equals [!Ref UsePrivateAppSync, "true"]
+   IsMLflowEnabled: !Equals [!Ref EnableMLflow, "true"]
+-  HasArtifactsBucketKmsKey: !Not [!Equals [!Ref ArtifactsBucketKmsKeyArn, ""]]
+ 
+ Resources:
+ 
+@@ -2895,337 +2914,6 @@ Resources:
+       realkie-fcc-verified: !Sub "s3://${ConfigurationBucket}/config_library/managed_config/realkie-fcc-verified/config.yaml"
+ 
+ 
+-  ##########################################################################
+-  # ECR Repository for Lambda container images
+-  ##########################################################################
+-
+-  ECRRepository:
+-    Type: AWS::ECR::Repository
+-    # checkov:skip=CKV_AWS_51: "Mutable tags allowed for workflow flexibility and version updates."
+-    Properties:
+-      EmptyOnDelete: true
+-      # checkov:skip=CKV_AWS_163: "ECR scanning controlled by parameter for environment-specific deployment requirements"
+-      ImageScanningConfiguration:
+-        ScanOnPush: !If [IsECRImageScanningEnabled, true, false]
+-      LifecyclePolicy:
+-        LifecyclePolicyText: |
+-          {
+-            "rules": [
+-              {
+-                "rulePriority": 1,
+-                "description": "Keep last 15 images",
+-                "selection": {
+-                  "tagStatus": "any",
+-                  "countType": "imageCountMoreThan",
+-                  "countNumber": 15
+-                },
+-                "action": {
+-                  "type": "expire"
+-                }
+-              }
+-            ]
+-          }
+-      EncryptionConfiguration:
+-        EncryptionType: KMS
+-        KmsKey: !Ref CustomerManagedEncryptionKeyArn
+-
+-  ##########################################################################
+-  # CodeBuild for building Lambda container images
+-  ##########################################################################
+-
+-  DockerBuildRole:
+-    Type: AWS::IAM::Role
+-    Metadata:
+-      cfn_nag:
+-        rules_to_suppress:
+-          - id: W11
+-            reason: "Wildcard permissions required for CloudWatch Logs creation"
+-          - id: W12
+-            reason: "Amazon Inspector ListCoverage and ListFindings require wildcard resource per AWS documentation"
+-    Properties:
+-      Path: /
+-      AssumeRolePolicyDocument:
+-        Version: 2012-10-17
+-        Statement:
+-          - Action: sts:AssumeRole
+-            Effect: Allow
+-            Principal:
+-              Service: !Sub "codebuild.${AWS::URLSuffix}"
+-      PermissionsBoundary:
+-        !If [
+-          HasPermissionsBoundary,
+-          !Ref PermissionsBoundaryArn,
+-          !Ref AWS::NoValue,
+-        ]
+-      ManagedPolicyArns:
+-        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+-      Policies:
+-        - PolicyName: CodeBuildAccess
+-          PolicyDocument:
+-            Version: 2012-10-17
+-            Statement:
+-              - Resource:
+-                  - !Sub "arn:${AWS::Partition}:s3:::${ArtifactBucket}"
+-                  - !Sub "arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactPrefix}/*"
+-                Effect: Allow
+-                Action:
+-                  - s3:GetObject
+-                  - s3:GetObjectVersion
+-                  - s3:GetBucketLocation
+-                  - s3:ListBucket
+-              - Resource:
+-                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+-                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*"
+-                Effect: Allow
+-                Action:
+-                  - logs:CreateLogGroup
+-                  - logs:CreateLogStream
+-                  - logs:PutLogEvents
+-              - Resource:
+-                  - !GetAtt ECRRepository.Arn
+-                Effect: Allow
+-                Action:
+-                  - ecr:DescribeImageScanFindings
+-                  - ecr:DescribeImages
+-                  - ecr:StartImageScan
+-              # Required for Amazon Inspector Enhanced Scanning
+-              # https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-scanning-enhanced-iam.html
+-              - Resource: "*"
+-                Effect: Allow
+-                Action:
+-                  - inspector2:ListCoverage
+-                  - inspector2:ListFindings
+-              # Required when ECR repository uses customer-managed KMS key encryption
+-              - Resource:
+-                  - !Ref CustomerManagedEncryptionKeyArn
+-                Effect: Allow
+-                Action:
+-                  - kms:Decrypt
+-                  - kms:CreateGrant
+-              # Grant kms:Decrypt on the artifacts bucket KMS key when provided
+-              # This allows DockerBuildRole to download source code from a KMS-encrypted artifact bucket
+-              - !If
+-                - HasArtifactsBucketKmsKey
+-                - Effect: Allow
+-                  Action:
+-                    - kms:Decrypt
+-                    - kms:GenerateDataKey*
+-                    - kms:DescribeKey
+-                  Resource: !Ref ArtifactsBucketKmsKeyArn
+-                - !Ref AWS::NoValue
+-              - !If
+-                - DeployInVPC
+-                - Effect: Allow
+-                  Action:
+-                    - ec2:CreateNetworkInterface
+-                    - ec2:DescribeNetworkInterfaces
+-                    - ec2:DeleteNetworkInterface
+-                    - ec2:DescribeSecurityGroups
+-                    - ec2:DescribeSubnets
+-                    - ec2:DescribeVpcs
+-                    - ec2:DescribeDhcpOptions
+-                  Resource: "*"
+-                - !Ref AWS::NoValue
+-              - !If
+-                - DeployInVPC
+-                - Effect: Allow
+-                  Action:
+-                    - ec2:CreateNetworkInterfacePermission
+-                  Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+-                  Condition:
+-                    StringEquals:
+-                      ec2:AuthorizedService: !Sub "codebuild.${AWS::URLSuffix}"
+-                - !Ref AWS::NoValue
+-
+-  DockerBuildProject:
+-    Type: AWS::CodeBuild::Project
+-    # cdk-nag suppress: AwsSolutions-CB5 - Privileged mode required for Docker image builds
+-    Properties:
+-      Name: !Sub "${AWS::StackName}-docker-build"
+-      Description: !Sub >-
+-        Unified Docker image builder for GenAIIDP stack - ${AWS::StackName}
+-      ServiceRole: !GetAtt DockerBuildRole.Arn
+-      EncryptionKey: !Ref CustomerManagedEncryptionKeyArn
+-      VpcConfig:
+-        !If
+-          - DeployInVPC
+-          - VpcId: !Ref VpcId
+-            Subnets: !Ref PrivateSubnetIds
+-            SecurityGroupIds:
+-              - !Ref LambdaSecurityGroupId
+-          - !Ref AWS::NoValue
+-      Artifacts:
+-        Type: NO_ARTIFACTS
+-      Source:
+-        Location: !Sub "arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactPrefix}/${SourceZipfile}"
+-        Type: S3
+-        BuildSpec: patterns/unified/buildspec.yml
+-      Environment:
+-        ComputeType: BUILD_GENERAL1_LARGE
+-        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+-        Type: LINUX_CONTAINER
+-        PrivilegedMode: true
+-        EnvironmentVariables:
+-          - Name: ECR_URI
+-            Value: !GetAtt ECRRepository.RepositoryUri
+-          - Name: IMAGE_VERSION
+-            Value: !Ref ImageVersion
+-          - Name: AWS_REGION
+-            Value: !Ref AWS::Region
+-          - Name: LAMBDA_ARCHITECTURE
+-            Value: !Ref LambdaArchitecture
+-      TimeoutInMinutes: 90
+-
+-  CodeBuildExecutionRole:
+-    Type: AWS::IAM::Role
+-    Metadata:
+-      cfn_nag:
+-        rules_to_suppress:
+-          - id: W11
+-            reason: "Role requires * resource access for CloudWatch Logs and CloudFormation custom resource operations"
+-    # checkov:skip=CKV_AWS_111: "Write access required for CloudWatch Logs and CloudFormation custom resource operations"
+-    Properties:
+-      AssumeRolePolicyDocument:
+-        Version: "2012-10-17"
+-        Statement:
+-          - Effect: Allow
+-            Principal:
+-              Service:
+-                - !Sub "lambda.${AWS::URLSuffix}"
+-            Action:
+-              - sts:AssumeRole
+-      Path: "/"
+-      PermissionsBoundary:
+-        !If [
+-          HasPermissionsBoundary,
+-          !Ref PermissionsBoundaryArn,
+-          !Ref AWS::NoValue,
+-        ]
+-      Policies:
+-        - PolicyName: root
+-          PolicyDocument:
+-            Version: "2012-10-17"
+-            Statement:
+-              - Effect: Allow
+-                Action:
+-                  - codebuild:StartBuild
+-                  - codebuild:BatchGetBuilds
+-                Resource:
+-                  - !GetAtt DockerBuildProject.Arn
+-              - Effect: Allow
+-                Action:
+-                  - logs:CreateLogGroup
+-                  - logs:CreateLogStream
+-                  - logs:PutLogEvents
+-                Resource: "*"
+-              - Effect: Allow
+-                Action:
+-                  - ecr:ListImages
+-                  - ecr:BatchDeleteImage
+-                  - ecr:DescribeImages
+-                Resource:
+-                  - !GetAtt ECRRepository.Arn
+-        # Used by custom resource helper poller
+-        # https://github.com/aws-cloudformation/custom-resource-helper
+-        - PolicyName: CustomResourcePoller
+-          PolicyDocument:
+-            Version: 2012-10-17
+-            Statement:
+-              - Effect: Allow
+-                Action:
+-                  - events:PutRule
+-                  - events:DeleteRule
+-                  - events:PutTargets
+-                  - events:RemoveTargets
+-                Resource:
+-                  - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/*"
+-              - Effect: Allow
+-                Action:
+-                  - lambda:AddPermission
+-                  - lambda:RemovePermission
+-                Resource:
+-                  - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:*"
+-      ManagedPolicyArns:
+-        - !If
+-          - DeployInVPC
+-          - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+-          - !Ref AWS::NoValue
+-
+-  CodeBuildTrigger:
+-    Type: AWS::Serverless::Function
+-    Metadata:
+-      cfn_nag:
+-        rules_to_suppress:
+-          - id: W89
+-            reason: "Function does not require VPC access as it only interacts with AWS services via APIs"
+-          - id: W92
+-            reason: "Function does not require reserved concurrency as it scales based on demand"
+-    # checkov:skip=CKV_AWS_116: "DLQ not required for Cfn Custom Resource function"
+-    # checkov:skip=CKV_AWS_117: "Function does not require VPC access as it only interacts with AWS services via APIs"
+-    # checkov:skip=CKV_AWS_115: "Function does not require reserved concurrency as it scales based on demand"
+-    Properties:
+-      PermissionsBoundary:
+-        !If [
+-          HasPermissionsBoundary,
+-          !Ref PermissionsBoundaryArn,
+-          !Ref AWS::NoValue,
+-        ]
+-      Role: !GetAtt CodeBuildExecutionRole.Arn
+-      Runtime: python3.12
+-      Timeout: 60
+-      VpcConfig:
+-        !If
+-          - DeployInVPC
+-          - SecurityGroupIds:
+-              - !Ref LambdaSecurityGroupId
+-            SubnetIds: !Ref PrivateSubnetIds
+-          - !Ref AWS::NoValue
+-      MemorySize: 128
+-      Handler: index.handler
+-      CodeUri: ../../src/lambda/start_codebuild
+-      Description:  CodeBuild trigger Lambda for Docker image builds
+-      LoggingConfig:
+-        LogGroup: !Ref CodeBuildTriggerLogGroup
+-
+-  CodeBuildTriggerLogGroup:
+-    Type: AWS::Logs::LogGroup
+-    Properties:
+-      KmsKeyId: !Ref CustomerManagedEncryptionKeyArn
+-      LogGroupName: !Sub "/${AWS::StackName}/lambda/CodeBuildTrigger"
+-      RetentionInDays: !Ref LogRetentionDays
+-
+-  DockerBuildRun:
+-    Type: Custom::CodeBuildRun
+-    Properties:
+-      ServiceToken: !GetAtt CodeBuildTrigger.Arn
+-      BuildProjectName: !Ref DockerBuildProject
+-      # Force rebuild when source changes (filename includes content hash)
+-      CodeLocation: !Sub "arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactPrefix}/${SourceZipfile}"
+-      ImageVersion: !Ref ImageVersion
+-      LambdaArchitecture: !Ref LambdaArchitecture
+-      ExpectedImages:
+-        - "bda-invoke-function"
+-        - "bda-completion-function"
+-        - "bda-processresults-function"
+-        - "ocr-function"
+-        - "classification-function"
+-        - "extraction-function"
+-        - "assessment-function"
+-        - "processresults-function"
+-        - "summarization-function"
+-        - "evaluation-function"
+-        - "rule-validation-function"
+-        - "rule-validation-orchestration-function"
+-        - "mlflow-logger-function"
+-
+-  EcrRepositoryCleanup:
+-    Type: Custom::ECRRepositoryCleanup
+-    DependsOn:
+-      - DockerBuildRun
+-    Properties:
+-      ServiceToken: !GetAtt CodeBuildTrigger.Arn
+-      RepositoryName: !Ref ECRRepository
+-
+   # Shared IAM policy for Lambda functions to pull container images from ECR
+   LambdaECRAccessPolicy:
+     Type: AWS::IAM::ManagedPolicy
+@@ -3247,7 +2935,6 @@ Resources:
+   ##########################################################################
+ 
+   InvokeBDAFunction:
+-    DependsOn: DockerBuildRun
+     Type: AWS::Serverless::Function
+     Metadata:
+       SkipBuild: True
+@@ -3266,7 +2953,7 @@ Resources:
+     Properties:
+       PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:bda-invoke-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${BdaInvokeImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       Timeout: 900
+@@ -3317,7 +3004,6 @@ Resources:
+   
+   BDAProcessResultsFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -3335,7 +3021,7 @@ Resources:
+     Properties:
+       PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:bda-processresults-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${BdaProcessResultsImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       Timeout: 900
+@@ -3450,7 +3136,6 @@ Resources:
+                 'aws:SecureTransport': false
+ 
+   BDACompletionFunction:
+-    DependsOn: DockerBuildRun
+     Type: AWS::Serverless::Function
+     Metadata:
+       SkipBuild: True
+@@ -3468,7 +3153,7 @@ Resources:
+     Properties:
+       PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:bda-completion-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${BdaCompletionImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       Timeout: 900
+@@ -3572,7 +3257,6 @@ Resources:
+ 
+   OCRFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -3595,7 +3279,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:ocr-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${OcrImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -3729,7 +3413,6 @@ Resources:
+ 
+   ClassificationFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -3752,7 +3435,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:classification-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${ClassificationImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -3896,7 +3579,6 @@ Resources:
+ 
+   ExtractionFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -3921,7 +3603,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:extraction-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${ExtractionImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -4065,7 +3747,6 @@ Resources:
+ 
+   AssessmentFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -4088,7 +3769,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:assessment-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${AssessmentImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -4223,7 +3904,6 @@ Resources:
+ 
+   ProcessResultsFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -4246,7 +3926,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:processresults-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${ProcessResultsImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -4322,7 +4002,6 @@ Resources:
+ 
+   SummarizationFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -4345,7 +4024,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:summarization-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${SummarizationImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -4569,7 +4248,6 @@ Resources:
+ 
+   EvaluationFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -4592,7 +4270,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:evaluation-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${EvaluationImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -4715,7 +4393,6 @@ Resources:
+ 
+   TestExecutionAggregationFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -4733,7 +4410,7 @@ Resources:
+     Properties:
+       PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:test-execution-aggregation-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${TestExecutionAggregationImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       Timeout: 900
+@@ -4771,7 +4448,6 @@ Resources:
+ 
+   RuleValidationPolicyClassificationFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -4794,7 +4470,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:rule-validation-policy-classification-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${RuleValidationPolicyClassificationImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -4866,7 +4542,6 @@ Resources:
+ 
+   RuleValidationFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -4890,7 +4565,7 @@ Resources:
+         ]
+       # Container configuration
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:rule-validation-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${RuleValidationImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -5013,7 +4688,6 @@ Resources:
+ 
+   RuleValidationOrchestrationFunction:
+     Type: AWS::Serverless::Function
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -5037,7 +4711,7 @@ Resources:
+         ]
+       # Container configuration
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:rule-validation-orchestration-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${RuleValidationOrchestrationImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+@@ -5183,7 +4857,6 @@ Resources:
+   MLflowLoggerFunction:
+     Type: AWS::Serverless::Function
+     Condition: IsMLflowEnabled
+-    DependsOn: DockerBuildRun
+     Metadata:
+       SkipBuild: True
+       cfn_nag:
+@@ -5206,7 +4879,7 @@ Resources:
+           !Ref AWS::NoValue,
+         ]
+       PackageType: Image
+-      ImageUri: !Sub "${ECRRepository.RepositoryUri}:mlflow-logger-function-${ImageVersion}"
++      ImageUri: !Sub "${IdpImageRepositoryUri}@${MlflowLoggerImageDigest}"
+       Architectures:
+         - !Ref LambdaArchitecture
+       ImageConfig:
+diff --git a/template.yaml b/template.yaml
+index 402ee98..4595713 100644
+--- a/template.yaml
++++ b/template.yaml
+@@ -420,6 +420,57 @@ Parameters:
+       Use arm64 (Graviton) for best price-performance, or x86_64 when using
+       custom base images that only support AMD64.
+ 
++  IdpImageRepositoryUri:
++    Type: String
++    AllowedPattern: "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com(?:\\.cn)?/[a-z0-9][a-z0-9._/-]*$"
++    Description: Bootstrap-owned private ECR repository URI for the reviewed IDP release.
++
++  BdaInvokeImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  BdaCompletionImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  BdaProcessResultsImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  OcrImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  ClassificationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  ExtractionImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  AssessmentImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  ProcessResultsImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  SummarizationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  EvaluationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  TestExecutionAggregationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  RuleValidationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  RuleValidationOrchestrationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  MlflowLoggerImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++  RuleValidationPolicyClassificationImageDigest:
++    Type: String
++    AllowedPattern: "^sha256:[0-9a-f]{64}$"
++
+   # Logging configuration
+   LogLevel:
+     Type: String
+@@ -2576,15 +2627,25 @@ Resources:
+           - !Ref EvaluationBaselineBucket
+           - !Ref EvaluationBaselineBucketName
+         SaveReportingFunctionName: !Ref SaveReportingDataFunctionV2
+-        ImageVersion: "<UNIFIED_IMAGE_VERSION>"
++        IdpImageRepositoryUri: !Ref IdpImageRepositoryUri
++        BdaInvokeImageDigest: !Ref BdaInvokeImageDigest
++        BdaCompletionImageDigest: !Ref BdaCompletionImageDigest
++        BdaProcessResultsImageDigest: !Ref BdaProcessResultsImageDigest
++        OcrImageDigest: !Ref OcrImageDigest
++        ClassificationImageDigest: !Ref ClassificationImageDigest
++        ExtractionImageDigest: !Ref ExtractionImageDigest
++        AssessmentImageDigest: !Ref AssessmentImageDigest
++        ProcessResultsImageDigest: !Ref ProcessResultsImageDigest
++        SummarizationImageDigest: !Ref SummarizationImageDigest
++        EvaluationImageDigest: !Ref EvaluationImageDigest
++        TestExecutionAggregationImageDigest: !Ref TestExecutionAggregationImageDigest
++        RuleValidationImageDigest: !Ref RuleValidationImageDigest
++        RuleValidationOrchestrationImageDigest: !Ref RuleValidationOrchestrationImageDigest
++        MlflowLoggerImageDigest: !Ref MlflowLoggerImageDigest
++        RuleValidationPolicyClassificationImageDigest: !Ref RuleValidationPolicyClassificationImageDigest
+         LambdaArchitecture: !Ref LambdaArchitecture
+-        ArtifactBucket: "<ARTIFACT_BUCKET_TOKEN>"
+-        ArtifactPrefix: "<ARTIFACT_PREFIX_TOKEN>"
+-        ArtifactsBucketKmsKeyArn: !Ref ArtifactsBucketKmsKeyArn
+-        SourceZipfile: "<UNIFIED_SOURCE_ZIPFILE_TOKEN>"
+         CustomClassificationModelARN: !Ref Pattern2CustomClassificationModelARN
+         CustomExtractionModelARN: !Ref Pattern2CustomExtractionModelARN
+-        EnableECRImageScanning: !Ref EnableECRImageScanning
+         PreviousIDPPattern: !GetAtt PreviousIDPPatternValue.IDPPattern
+ 
+         # Private AppSync VPC config (req #2) — puts processing Lambdas in VPC

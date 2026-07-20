@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "1.0",
+  "upstreamVersion": "0.5.16",
+  "upstreamCommit": "1463fb6ff91c9e0169a148b33e6bc85d12bab995",
+  "platform": "linux/arm64",
+  "architecture": "arm64",
+  "context": ".",
+  "dockerfile": "Dockerfile.optimized",
+  "baseImages": {
+    "uv": "ghcr.io/astral-sh/uv:0.9.6@sha256:4b96ee9429583983fd172c33a02ecac5242d63fb46bc27804748e38c1cc9ad0d",
+    "lambdaPythonArm64": "public.ecr.aws/lambda/python:3.12-arm64@sha256:19430f65b9275fbedfd184570892d4399b56d52ddac84cd6aa73afb6fe3dcd78"
+  },
+  "images": [
+    {
+      "logicalName": "bda-invoke-function",
+      "sourcePath": "patterns/unified/src/bda_invoke_function",
+      "digestParameter": "BdaInvokeImageDigest",
+      "lambdaLogicalId": "InvokeBDAFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "bda-completion-function",
+      "sourcePath": "patterns/unified/src/bda_completion_function",
+      "digestParameter": "BdaCompletionImageDigest",
+      "lambdaLogicalId": "BDACompletionFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "bda-processresults-function",
+      "sourcePath": "patterns/unified/src/bda_processresults_function",
+      "digestParameter": "BdaProcessResultsImageDigest",
+      "lambdaLogicalId": "BDAProcessResultsFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "ocr-function",
+      "sourcePath": "patterns/unified/src/ocr_function",
+      "digestParameter": "OcrImageDigest",
+      "lambdaLogicalId": "OCRFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "classification-function",
+      "sourcePath": "patterns/unified/src/classification_function",
+      "digestParameter": "ClassificationImageDigest",
+      "lambdaLogicalId": "ClassificationFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "extraction-function",
+      "sourcePath": "patterns/unified/src/extraction_function",
+      "digestParameter": "ExtractionImageDigest",
+      "lambdaLogicalId": "ExtractionFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "assessment-function",
+      "sourcePath": "patterns/unified/src/assessment_function",
+      "digestParameter": "AssessmentImageDigest",
+      "lambdaLogicalId": "AssessmentFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "processresults-function",
+      "sourcePath": "patterns/unified/src/processresults_function",
+      "digestParameter": "ProcessResultsImageDigest",
+      "lambdaLogicalId": "ProcessResultsFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "summarization-function",
+      "sourcePath": "patterns/unified/src/summarization_function",
+      "digestParameter": "SummarizationImageDigest",
+      "lambdaLogicalId": "SummarizationFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "evaluation-function",
+      "sourcePath": "patterns/unified/src/evaluation_function",
+      "digestParameter": "EvaluationImageDigest",
+      "lambdaLogicalId": "EvaluationFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "test-execution-aggregation-function",
+      "sourcePath": "patterns/unified/src/test_execution_aggregation_function",
+      "digestParameter": "TestExecutionAggregationImageDigest",
+      "lambdaLogicalId": "TestExecutionAggregationFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "rule-validation-function",
+      "sourcePath": "patterns/unified/src/rule-validation-function",
+      "digestParameter": "RuleValidationImageDigest",
+      "lambdaLogicalId": "RuleValidationFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "rule-validation-orchestration-function",
+      "sourcePath": "patterns/unified/src/rule-validation-orchestration-function",
+      "digestParameter": "RuleValidationOrchestrationImageDigest",
+      "lambdaLogicalId": "RuleValidationOrchestrationFunction",
+      "buildArgs": {}
+    },
+    {
+      "logicalName": "mlflow-logger-function",
+      "sourcePath": "patterns/unified/src/mlflow_logger_function",
+      "digestParameter": "MlflowLoggerImageDigest",
+      "lambdaLogicalId": "MLflowLoggerFunction",
+      "buildArgs": {
+        "INSTALL_GIT": "true"
+      }
+    },
+    {
+      "logicalName": "rule-validation-policy-classification-function",
+      "sourcePath": "patterns/unified/src/rule-validation-policy-classification-function",
+      "digestParameter": "RuleValidationPolicyClassificationImageDigest",
+      "lambdaLogicalId": "RuleValidationPolicyClassificationFunction",
+      "buildArgs": {}
+    }
+  ]
+}

@@ -6,16 +6,19 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 MINIMUM_LINE_COVERAGE = 80.0
-PRODUCTION_ROOT = PurePosixPath("services")
+PRODUCTION_ROOTS = (PurePosixPath("services"), PurePosixPath("tooling"))
 
 
 def normalized_path(value: str) -> PurePosixPath:
     path = PurePosixPath(value.replace("\\", "/"))
-    try:
-        production_index = path.parts.index(PRODUCTION_ROOT.name)
-    except ValueError:
+    indexes = [
+        path.parts.index(root.name)
+        for root in PRODUCTION_ROOTS
+        if root.name in path.parts
+    ]
+    if not indexes:
         return path
-    return PurePosixPath(*path.parts[production_index:])
+    return PurePosixPath(*path.parts[min(indexes) :])
 
 
 def line_percentage(summary: dict[str, Any]) -> float:
@@ -38,7 +41,7 @@ def validate_report(report: dict[str, Any]) -> list[tuple[str, float]]:
         key=lambda item: item[0].as_posix(),
     )
     for path, details in normalized_files:
-        if not path.is_relative_to(PRODUCTION_ROOT) or path.suffix != ".py":
+        if not any(path.is_relative_to(root) for root in PRODUCTION_ROOTS) or path.suffix != ".py":
             continue
         if not isinstance(details, dict) or not isinstance(details.get("summary"), dict):
             raise ValueError(f"Coverage report has no summary for {path}.")
@@ -48,7 +51,9 @@ def validate_report(report: dict[str, Any]) -> list[tuple[str, float]]:
             failures.append((path.as_posix(), percentage))
 
     if not measured:
-        raise ValueError("Coverage report contains no production Python files under services/.")
+        raise ValueError(
+            "Coverage report contains no production Python files under services/ or tooling/."
+        )
 
     totals = report.get("totals")
     if not isinstance(totals, dict):

@@ -10,5 +10,11 @@
     "uv": "0.9.6"
   },
   "deploymentMode": "headless",
-  "notes": "Pin the source commit and publish immutable production templates; do not deploy production from a moving branch."
+  "externalImageOverlay": {
+    "path": "vendor/patches/idp-v0.5.16-external-images.patch",
+    "sha256": "69337fea48348682608d95fedc0aa338d97c678324ad0011dc8fb5d5b3910d01",
+    "imageContractPath": "config/idp/images.json",
+    "imageContractSha256": "a55e0a6f0665b4dc8cf7694c9b360c6bb22d678d98c29d5fd83f2fa1dfe7621b"
+  },
+  "notes": "Pin the source commit and publish immutable production templates; do not deploy production from a moving branch. Images are built by the protected GitHub workflow and deployed by digest."
 }

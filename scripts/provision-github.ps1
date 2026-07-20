@@ -86,7 +86,9 @@ foreach ($requiredOutput in @(
     'IdpCloudFormationExecutionRoleArn',
     'PlatformRolePermissionsBoundaryArn',
     'IdpRolePermissionsBoundaryArn',
-    'ArtifactBucketName'
+    'ArtifactBucketName',
+    'IdpImageRepositoryUri',
+    'IdpImageBuildRoleArn'
 )) {
     if ([string]::IsNullOrWhiteSpace([string]$outputs[$requiredOutput])) {
         throw "Bootstrap stack output '$requiredOutput' is missing."
@@ -148,6 +150,9 @@ if ($PSCmdlet.ShouldProcess("$repository environment $($config.githubEnvironment
         AWS_PLATFORM_ROLE_PERMISSIONS_BOUNDARY_ARN = $outputs.PlatformRolePermissionsBoundaryArn
         AWS_IDP_ROLE_PERMISSIONS_BOUNDARY_ARN = $outputs.IdpRolePermissionsBoundaryArn
         AWS_ARTIFACT_BUCKET = $outputs.ArtifactBucketName
+        AWS_ARTIFACT_KEY_ARN = $outputs.ArtifactKeyArn
+        AWS_IDP_IMAGE_REPOSITORY_URI = $outputs.IdpImageRepositoryUri
+        AWS_IDP_IMAGE_BUILD_ROLE_ARN = $outputs.IdpImageBuildRoleArn
         DEPLOYMENT_CONFIG_JSON = $environmentJson
     }
     foreach ($entry in $variables.GetEnumerator()) {

@@ -19,20 +19,22 @@ def summary(covered: int, statements: int) -> dict[str, int]:
     return {"covered_lines": covered, "num_statements": statements}
 
 
-def test_coverage_gate_requires_eighty_percent_for_every_service_file() -> None:
+def test_coverage_gate_requires_eighty_percent_for_every_production_file() -> None:
     gate = load_gate()
     report = {
         "files": {
             "services\\loan_api\\app.py": {"summary": summary(8, 10)},
             "services/upload_processor/app.py": {"summary": summary(9, 10)},
+            "tooling/idp_images.py": {"summary": summary(10, 10)},
             "tests/test_loan_api.py": {"summary": summary(0, 100)},
         },
-        "totals": summary(17, 20),
+        "totals": summary(27, 30),
     }
 
     assert gate.validate_report(report) == [
         ("services/loan_api/app.py", 80.0),
         ("services/upload_processor/app.py", 90.0),
+        ("tooling/idp_images.py", 100.0),
     ]
 
     report["files"]["services\\loan_api\\app.py"]["summary"] = summary(79, 100)
@@ -56,6 +58,20 @@ def test_coverage_gate_normalizes_absolute_service_paths(absolute_path: str) -> 
     }
 
     assert gate.validate_report(report) == [("services/azure_api/main.py", 80.0)]
+
+
+def test_coverage_gate_normalizes_absolute_tooling_paths() -> None:
+    gate = load_gate()
+    report = {
+        "files": {
+            r"D:\a\platform\platform\tooling\idp_images.py": {
+                "summary": summary(9, 10)
+            }
+        },
+        "totals": summary(9, 10),
+    }
+
+    assert gate.validate_report(report) == [("tooling/idp_images.py", 90.0)]
 
 
 def test_coverage_gate_rejects_missing_production_measurements() -> None:

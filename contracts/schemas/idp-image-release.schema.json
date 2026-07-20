@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hdduong/aws-idp-custom-platform/contracts/schemas/idp-image-release.schema.json",
+  "title": "AWS IDP image release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "releaseId",
+    "status",
+    "environment",
+    "aws",
+    "source",
+    "workflow",
+    "builtAt",
+    "platform",
+    "images"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "releaseId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$" },
+    "status": { "const": "COMPLETE" },
+    "environment": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,12}$" },
+    "aws": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accountId", "region", "repositoryUri"],
+      "properties": {
+        "accountId": { "type": "string", "pattern": "^[0-9]{12}$" },
+        "region": { "type": "string", "pattern": "^[a-z]{2}(?:-gov)?-[a-z]+-[0-9]+$" },
+        "repositoryUri": {
+          "type": "string",
+          "pattern": "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com(?:\\.cn)?/[a-z0-9][a-z0-9._/-]*$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upstreamRepository",
+        "upstreamVersion",
+        "upstreamCommit",
+        "lockSha256",
+        "imageContractSha256",
+        "overlaySha256",
+        "platformCommit"
+      ],
+      "properties": {
+        "upstreamRepository": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "upstreamVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "upstreamCommit": { "$ref": "#/$defs/gitCommit" },
+        "lockSha256": { "$ref": "#/$defs/sha256Hex" },
+        "imageContractSha256": { "$ref": "#/$defs/sha256Hex" },
+        "overlaySha256": { "$ref": "#/$defs/sha256Hex" },
+        "platformCommit": { "$ref": "#/$defs/gitCommit" }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "ref", "runId", "runAttempt", "runUrl", "actor"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "ref": { "type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$" },
+        "runId": { "type": "string", "pattern": "^[0-9]+$" },
+        "runAttempt": { "type": "integer", "minimum": 1 },
+        "runUrl": { "type": "string", "format": "uri", "pattern": "^https://github\\.com/" },
+        "actor": { "type": "string", "pattern": "^[A-Za-z0-9-]+$" }
+      }
+    },
+    "builtAt": { "type": "string", "format": "date-time" },
+    "platform": { "const": "linux/arm64" },
+    "images": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "items": { "$ref": "#/$defs/image" }
+    }
+  },
+  "$defs": {
+    "gitCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256Hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ociDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "imageName": {
+      "enum": [
+        "assessment-function",
+        "bda-completion-function",
+        "bda-invoke-function",
+        "bda-processresults-function",
+        "classification-function",
+        "evaluation-function",
+        "extraction-function",
+        "mlflow-logger-function",
+        "ocr-function",
+        "processresults-function",
+        "rule-validation-function",
+        "rule-validation-orchestration-function",
+        "rule-validation-policy-classification-function",
+        "summarization-function",
+        "test-execution-aggregation-function"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attestationUrl", "predicateType"],
+      "properties": {
+        "attestationUrl": { "type": "string", "format": "uri", "pattern": "^https://github\\.com/" },
+        "predicateType": { "type": "string", "format": "uri" }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalName",
+        "sourcePath",
+        "digestParameter",
+        "repositoryUri",
+        "tag",
+        "digest",
+        "imageUri",
+        "platform",
+        "mediaType",
+        "scan",
+        "provenance",
+        "sbom"
+      ],
+      "properties": {
+        "logicalName": { "$ref": "#/$defs/imageName" },
+        "sourcePath": { "type": "string", "pattern": "^patterns/unified/src/[A-Za-z0-9_-]+$" },
+        "digestParameter": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]+Digest$" },
+        "repositoryUri": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$" },
+        "digest": { "$ref": "#/$defs/ociDigest" },
+        "imageUri": { "type": "string", "pattern": "^[^:@\\s]+(?:[/:][^:@\\s]+)*@sha256:[0-9a-f]{64}$" },
+        "platform": { "const": "linux/arm64" },
+        "mediaType": {
+          "enum": [
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.manifest.v1+json"
+          ]
+        },
+        "scan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scanner", "scannerVersion", "status", "severityThreshold", "completedAt", "reportSha256"],
+          "properties": {
+            "scanner": { "const": "trivy" },
+            "scannerVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+            "status": { "const": "PASS" },
+            "severityThreshold": { "const": "HIGH,CRITICAL" },
+            "completedAt": { "type": "string", "format": "date-time" },
+            "reportSha256": { "$ref": "#/$defs/sha256Hex" }
+          }
+        },
+        "provenance": { "$ref": "#/$defs/evidence" },
+        "sbom": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["attestationUrl", "predicateType", "format", "documentSha256"],
+          "properties": {
+            "attestationUrl": { "type": "string", "format": "uri", "pattern": "^https://github\\.com/" },
+            "predicateType": { "type": "string", "format": "uri" },
+            "format": { "const": "cyclonedx-json" },
+            "documentSha256": { "$ref": "#/$defs/sha256Hex" }
+          }
+        }
+      }
+    }
+  }
+}

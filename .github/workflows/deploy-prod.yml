@@ -42,6 +42,16 @@ on:
         required: true
         default: false
         type: boolean
+      idp_manifest_s3_key:
+        description: Protected S3 key for the complete GitHub-built IDP image manifest
+        required: false
+        default: ''
+        type: string
+      idp_manifest_sha256:
+        description: SHA-256 printed by the IDP image release workflow
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -66,6 +76,8 @@ jobs:
       BIND_UI_CUSTOM_DOMAIN: ${{ inputs.bind_ui_custom_domain }}
       REINSTALL_IDP_CLI: ${{ inputs.reinstall_idp_cli }}
       CLEAN_IDP_BUILD: ${{ inputs.clean_idp_build }}
+      IDP_MANIFEST_S3_KEY: ${{ inputs.idp_manifest_s3_key }}
+      IDP_MANIFEST_SHA256: ${{ inputs.idp_manifest_sha256 }}
     steps:
       - name: Verify deployment intent
         shell: pwsh
@@ -81,6 +93,9 @@ jobs:
           }
           if ($env:BIND_UI_CUSTOM_DOMAIN -ceq 'true' -and $env:SKIP_WEB -ceq 'true') {
             throw 'UI custom-domain cutover cannot be requested while web publication is skipped.'
+          }
+          if ($env:SKIP_IDP -cne 'true' -and ([string]::IsNullOrWhiteSpace($env:IDP_MANIFEST_S3_KEY) -or [string]::IsNullOrWhiteSpace($env:IDP_MANIFEST_SHA256))) {
+            throw 'IDP deployment requires the S3 manifest key and SHA-256 from the GitHub image release workflow.'
           }
 
       - name: Check out reviewed source
@@ -125,7 +140,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruff check services scripts tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pytest -q --cov=services --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
+          pytest -q --cov=services --cov=tooling --cov-branch --cov-report=term-missing --cov-report=json:coverage.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/check-python-coverage.py coverage.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -195,6 +210,21 @@ jobs:
           ./scripts/deploy-azure.ps1 -EnvironmentFile $env:DEPLOYMENT_CONFIG_PATH -FoundationOnly
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Download and verify selected IDP image manifest
+        if: env.SKIP_IDP != 'true'
+        shell: pwsh
+        env:
+          AWS_ARTIFACT_BUCKET: ${{ vars.AWS_ARTIFACT_BUCKET }}
+        run: |
+          $directory = Join-Path $env:GITHUB_WORKSPACE '.local'
+          [IO.Directory]::CreateDirectory($directory) | Out-Null
+          $path = Join-Path $directory 'idp-image-release.json'
+          aws s3 cp "s3://$($env:AWS_ARTIFACT_BUCKET)/$($env:IDP_MANIFEST_S3_KEY)" $path --no-cli-pager
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to download the selected IDP image manifest.' }
+          $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $env:IDP_MANIFEST_SHA256.ToLowerInvariant()) { throw 'Downloaded IDP image manifest checksum does not match the requested release.' }
+          "IDP_IMAGE_MANIFEST_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Materialize reviewed Entra and federation identifiers
         shell: pwsh
         env:
@@ -261,6 +291,7 @@ jobs:
             BindUiCustomDomain = ($env:BIND_UI_CUSTOM_DOMAIN -ceq 'true')
             ReinstallIdpCli = ($env:REINSTALL_IDP_CLI -ceq 'true')
             CleanIdpBuild = ($env:CLEAN_IDP_BUILD -ceq 'true')
+            IdpImageManifestFile = $env:IDP_IMAGE_MANIFEST_PATH
             ImageTag = $env:GITHUB_SHA
           }
           ./scripts/deploy-all.ps1 @parameters

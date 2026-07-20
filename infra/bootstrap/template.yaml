@@ -136,6 +136,59 @@ Resources:
               Bool:
                 aws:SecureTransport: false
 
+  IdpImageRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub 'loan-document-${EnvironmentName}-idp-images'
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !GetAtt ArtifactKey.Arn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire only untagged abandoned image manifests",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 30
+                },
+                "action": {"type": "expire"}
+              }
+            ]
+          }
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaPullOnly
+            Effect: Allow
+            Principal:
+              Service: !Sub 'lambda.${AWS::URLSuffix}'
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${IdpStackName}-*'
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Artifact
+          Value: idp-lambda-images
+
   PlatformRolePermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -181,7 +234,6 @@ Resources:
               - cloudformation:GetTemplate
               - cloudformation:List*
               - cloudwatch:*
-              - codebuild:*
               - dynamodb:*
               - ec2:*
               - ecr:*
@@ -452,7 +504,6 @@ Resources:
                   - athena:*
                   - bedrock:*
                   - cloudwatch:*
-                  - codebuild:*
                   - dynamodb:*
                   - ec2:*
                   - ecr:*
@@ -560,7 +611,6 @@ Resources:
                     iam:PassedToService:
                       - bedrock.amazonaws.com
                       - bedrock-agentcore.amazonaws.com
-                      - codebuild.amazonaws.com
                       - ec2.amazonaws.com
                       - events.amazonaws.com
                       - glue.amazonaws.com
@@ -714,6 +764,66 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+  IdpImageBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'loan-document-${EnvironmentName}-github-idp-images'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOwner}/${GitHubRepository}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: PublishIdpImages
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: PublishOnlyPinnedRepository
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt IdpImageRepository.Arn
+              - Sid: WriteReleaseEvidence
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:PutObject
+                Resource: !Sub '${ArtifactBucket.Arn}/idp-images/${EnvironmentName}/*'
+              - Sid: ReleaseEvidenceEncryption
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt ArtifactKey.Arn
+      Tags:
+        - Key: Application
+          Value: loan-document-platform
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
 Outputs:
   GitHubOidcProviderArn:
     Value: !If
@@ -734,3 +844,11 @@ Outputs:
     Value: !Ref ArtifactBucket
   ArtifactKeyArn:
     Value: !GetAtt ArtifactKey.Arn
+  IdpImageRepositoryName:
+    Value: !Ref IdpImageRepository
+  IdpImageRepositoryArn:
+    Value: !GetAtt IdpImageRepository.Arn
+  IdpImageRepositoryUri:
+    Value: !GetAtt IdpImageRepository.RepositoryUri
+  IdpImageBuildRoleArn:
+    Value: !GetAtt IdpImageBuildRole.Arn

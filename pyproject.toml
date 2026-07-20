@@ -1,10 +1,11 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+pythonpath = ["."]
 
 [tool.coverage.run]
 branch = true
-source = ["services"]
+source = ["services", "tooling"]
 
 [tool.coverage.report]
 show_missing = true

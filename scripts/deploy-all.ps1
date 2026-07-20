@@ -4,6 +4,7 @@ param(
     [string]$EntraDeploymentFile = '',
     [string]$FederationDeploymentFile = '',
     [string]$ImageTag = '',
+    [string]$IdpImageManifestFile = '',
     [switch]$SkipAzureFoundation,
     [switch]$SkipEntra,
     [switch]$SkipIdp,
@@ -75,10 +76,16 @@ if (-not $SkipIdp) {
 & (Join-Path $PSScriptRoot 'deploy-platform.ps1') @initialPlatformArguments
 
 if (-not $SkipIdp) {
-    & (Join-Path $PSScriptRoot 'deploy-idp.ps1') `
-        -EnvironmentFile $EnvironmentFile `
-        -ReinstallCli:$ReinstallIdpCli `
-        -CleanBuild:$CleanIdpBuild
+    if ([string]::IsNullOrWhiteSpace($IdpImageManifestFile)) {
+        throw 'IdpImageManifestFile is required when IDP deployment is not skipped.'
+    }
+    $idpArguments = @{
+        EnvironmentFile = $EnvironmentFile
+        ImageManifestFile = $IdpImageManifestFile
+        ReinstallCli = $ReinstallIdpCli
+        CleanBuild = $CleanIdpBuild
+    }
+    & (Join-Path $PSScriptRoot 'deploy-idp.ps1') @idpArguments
 
     # The first private-runtime pass creates the postprocessor hook required by
     # IDP. The second binds exact IDP buckets/key/state-machine outputs without

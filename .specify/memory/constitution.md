@@ -102,9 +102,9 @@ service failure MUST fail closed and MUST NOT be treated as a completed review.
 
 ### IX. Mandatory Coverage and Browser Integration
 
-Every hand-authored production Python file under `services/` MUST independently
-maintain at least 80% line coverage, and the combined service suite MUST remain
-at or above the same floor. Repository-wide aggregation MUST NOT conceal an
+Every hand-authored production Python file under `services/` or `tooling/` MUST
+independently maintain at least 80% line coverage, and the combined production
+Python suite MUST remain at or above the same floor. Repository-wide aggregation MUST NOT conceal an
 individual file below the threshold. Every hand-authored React/TypeScript
 production file MUST independently maintain at least 80% statements, lines,
 functions, and branches. Generated OpenAPI clients, type-only declarations,
@@ -122,6 +122,24 @@ real document, or customer data. Critical hosted Entra/API/S3 journeys require
 an environment-gated synthetic Playwright smoke suite before production
 acceptance. Browser tests supplement rather than replace unit coverage,
 authorization tests, accessibility review, or live operational acceptance.
+
+### X. Reproducible Cloud Artifact Supply Chain
+
+Every executable cloud artifact MUST be reproducible from pinned source by a
+reviewed repository workflow. Production container images MUST be private,
+single-architecture, vulnerability-scanned, accompanied by retained provenance
+and an SBOM, and deployed only by immutable content digest from a validated,
+all-or-nothing release manifest. Mutable tags, partial release sets, unverified
+source overlays, and deployment-time image rebuilding MUST fail closed.
+
+Artifact publication MUST use a separate least-privilege short-lived workload
+identity restricted to the exact GitHub repository and protected environment.
+Untrusted pull-request code MUST never receive cloud publication credentials or
+write access to production artifact stores. The active release and sufficient
+prior complete releases for the specified rollback objective MUST remain
+available. A managed cloud build service such as CodeBuild requires an explicit
+specification-level exception documenting why the repository workflow cannot
+provide equivalent reproducibility, isolation, evidence, and recovery.
 
 ## Technology and Compliance Constraints
 
@@ -174,4 +192,4 @@ Every plan MUST include a constitution check, and every review MUST reject
 unjustified violations. `CLAUDE.md` supplies agent-specific operating context
 but cannot weaken this constitution.
 
-**Version**: 1.4.0 | **Ratified**: 2026-07-14 | **Last Amended**: 2026-07-18
+**Version**: 1.5.0 | **Ratified**: 2026-07-14 | **Last Amended**: 2026-07-19
