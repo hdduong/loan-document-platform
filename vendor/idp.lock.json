@@ -12,7 +12,7 @@
   "deploymentMode": "headless",
   "externalImageOverlay": {
     "path": "vendor/patches/idp-v0.5.16-external-images.patch",
-    "sha256": "69337fea48348682608d95fedc0aa338d97c678324ad0011dc8fb5d5b3910d01",
+    "sha256": "86076049d905125dc0780e98d6893d49f619a16351680f18a528ff1fdfef0335",
     "imageContractPath": "config/idp/images.json",
     "imageContractSha256": "a55e0a6f0665b4dc8cf7694c9b360c6bb22d678d98c29d5fd83f2fa1dfe7621b"
   },

@@ -114,6 +114,16 @@ def test_contract_matches_pinned_upstream_and_exact_inventory() -> None:
     assert len({entry["lambdaLogicalId"] for entry in indexed.values()}) == 15
 
 
+def test_overlay_uses_cross_platform_vite_entrypoint() -> None:
+    overlay = (ROOT / "vendor" / "patches" / "idp-v0.5.16-external-images.patch").read_text(
+        encoding="utf-8"
+    )
+
+    assert "src/ui/package.json" in overlay
+    assert "./node_modules/vite/bin/vite.js build" in overlay
+    assert "+    \"build\": " in overlay
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [

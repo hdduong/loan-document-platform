@@ -212,7 +212,12 @@ Invoke-Checked -Command git -Arguments @(
 ) -FailureMessage 'The reviewed external-image overlay introduced invalid whitespace.'
 $actualOverlayFiles = @(& git -C $buildDirectory diff --name-only --) | Sort-Object
 if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the applied external-image overlay.' }
-$expectedOverlayFiles = @('Dockerfile.optimized', 'patterns/unified/template.yaml', 'template.yaml') | Sort-Object
+$expectedOverlayFiles = @(
+    'Dockerfile.optimized',
+    'patterns/unified/template.yaml',
+    'src/ui/package.json',
+    'template.yaml'
+) | Sort-Object
 if (($actualOverlayFiles -join "`n") -cne ($expectedOverlayFiles -join "`n")) {
     throw "External-image overlay touched unexpected files: $($actualOverlayFiles -join ', ')."
 }

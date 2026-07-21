@@ -156,7 +156,12 @@ jobs:
           & git -C .idp-source apply --whitespace=error-all $patchPath
           if ($LASTEXITCODE -ne 0) { throw 'Failed to apply the reviewed external-image overlay.' }
           $changed = @(& git -C .idp-source diff --name-only --) | Sort-Object
-          $expected = @('Dockerfile.optimized', 'patterns/unified/template.yaml', 'template.yaml') | Sort-Object
+          $expected = @(
+            'Dockerfile.optimized',
+            'patterns/unified/template.yaml',
+            'src/ui/package.json',
+            'template.yaml'
+          ) | Sort-Object
           if (($changed -join "`n") -cne ($expected -join "`n")) {
             throw "External-image overlay touched unexpected files: $($changed -join ', ')."
           }
