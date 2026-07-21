@@ -195,6 +195,14 @@ def test_pr_workflow_applies_reviewed_overlay_before_build() -> None:
             "Duplicate Lambda logical",
         ),
         (
+            lambda value: value["images"][0].pop("lambdaLogicalId"),
+            "Invalid Lambda logical ID",
+        ),
+        (
+            lambda value: value["images"][0].update(lambdaLogicalId="1Invalid"),
+            "Invalid Lambda logical ID",
+        ),
+        (
             lambda value: value["images"][0].update(sourcePath="../escape"),
             "source path",
         ),

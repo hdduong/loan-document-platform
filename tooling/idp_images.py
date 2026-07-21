@@ -146,6 +146,8 @@ def validate_contract(
             raise ImageContractError(f"Invalid digest parameter: {parameter}")
         if parameter in parameters:
             raise ImageContractError("Duplicate digest parameter")
+        if not isinstance(logical_id, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,254}", logical_id):
+            raise ImageContractError(f"Invalid Lambda logical ID: {logical_id}")
         if logical_id in logical_ids:
             raise ImageContractError("Duplicate Lambda logical ID")
         args = image.get("buildArgs", {})
