@@ -1,5 +1,5 @@
 azure-identity==1.25.3
-boto3==1.43.51
+boto3==1.43.52
 fastapi==0.139.1
 PyJWT[crypto]==2.13.0
 starlette==1.3.1
