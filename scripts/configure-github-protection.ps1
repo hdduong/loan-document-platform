@@ -92,7 +92,7 @@ if ($PSCmdlet.ShouldProcess($repository, 'Harden repository, Actions, branch, Co
         verified_allowed = $false
         patterns_allowed = @(
             'aws-actions/*',
-            'azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5'
+            'azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43'
         )
     } | Out-Null
 

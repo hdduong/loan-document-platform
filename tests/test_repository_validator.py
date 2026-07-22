@@ -1243,7 +1243,7 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
         ".specify/feature.json": '{"feature_directory":"specs/002-azure-api-control-plane"}',
         "vendor/idp.lock.json": (
             '{"deploymentMode":"headless","cliPythonVersion":"3.12",'
-            '"cliBuildTools":{"cfnLint":"1.53.0","ruff":"0.15.21","uv":"0.9.6"}}'
+            '"cliBuildTools":{"cfnLint":"1.53.1","ruff":"0.15.22","uv":"0.9.6"}}'
         ),
         "scripts/deploy-idp.ps1": (
             "idp-cli deploy --headless IdpCloudFormationExecutionRoleArn "
@@ -1385,18 +1385,18 @@ def test_azure_control_plane_rejects_an_aws_public_api(tmp_path: Path, monkeypat
         ),
         "services/azure_api/requirements.txt": (
             "azure-identity==1.25.3\n"
-            "boto3==1.43.51\n"
-            "fastapi==0.139.1\n"
+            "boto3==1.43.52\n"
+            "fastapi==0.139.2\n"
             "PyJWT[crypto]==2.13.0\n"
             "starlette==1.3.1\n"
             "uvicorn==0.51.0\n"
         ),
         "requirements-dev.txt": (
-            "cfn-lint==1.53.0\n"
-            "ruff==0.15.21\n"
+            "cfn-lint==1.53.1\n"
+            "ruff==0.15.22\n"
             "azure-identity==1.25.3\n"
-            "boto3==1.43.51\n"
-            "fastapi==0.139.1\n"
+            "boto3==1.43.52\n"
+            "fastapi==0.139.2\n"
             "httpx2==2.7.0\n"
             "PyJWT[crypto]==2.13.0\n"
             "starlette==1.3.1\n"

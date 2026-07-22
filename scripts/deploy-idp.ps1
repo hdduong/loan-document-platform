@@ -52,8 +52,8 @@ if ([string]$lock.cliPythonVersion -cne '3.12') {
     throw 'The reviewed IDP 0.5.16 CLI dependency set requires Python 3.12.'
 }
 $reviewedBuildTools = @{
-    cfnLint = '1.53.0'
-    ruff = '0.15.21'
+    cfnLint = '1.53.1'
+    ruff = '0.15.22'
     uv = '0.9.6'
 }
 foreach ($name in $reviewedBuildTools.Keys) {

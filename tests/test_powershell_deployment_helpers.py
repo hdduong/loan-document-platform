@@ -467,8 +467,8 @@ def test_idp_cli_toolchain_keeps_python_runtimes_split() -> None:
 
     assert lock["cliPythonVersion"] == "3.12"
     assert lock["cliBuildTools"] == {
-        "cfnLint": "1.53.0",
-        "ruff": "0.15.21",
+        "cfnLint": "1.53.1",
+        "ruff": "0.15.22",
         "uv": "0.9.6",
     }
     assert "foreach ($command in 'aws', 'git', 'sam', 'node', 'npm')" in deploy

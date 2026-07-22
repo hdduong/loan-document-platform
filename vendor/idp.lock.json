@@ -5,8 +5,8 @@
   "commit": "1463fb6ff91c9e0169a148b33e6bc85d12bab995",
   "cliPythonVersion": "3.12",
   "cliBuildTools": {
-    "cfnLint": "1.53.0",
-    "ruff": "0.15.21",
+    "cfnLint": "1.53.1",
+    "ruff": "0.15.22",
     "uv": "0.9.6"
   },
   "deploymentMode": "headless",
