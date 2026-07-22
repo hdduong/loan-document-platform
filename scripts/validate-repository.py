@@ -1076,7 +1076,7 @@ def validate_idp_python_toolchain_contract(
     )
     require(
         lock.get("cliBuildTools")
-        == {"cfnLint": "1.53.0", "ruff": "0.15.21", "uv": "0.9.6"},
+        == {"cfnLint": "1.53.1", "ruff": "0.15.21", "uv": "0.9.6"},
         "Pinned IDP publisher build-tool versions changed.",
     )
     for fragment in (
