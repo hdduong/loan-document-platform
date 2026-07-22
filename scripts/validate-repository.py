@@ -1483,7 +1483,7 @@ def validate_azure_control_plane() -> None:
     for required_pin in (
         "azure-identity==1.25.3",
         "boto3==1.43.51",
-        "fastapi==0.139.1",
+        "fastapi==0.139.2",
         "PyJWT[crypto]==2.13.0",
         "starlette==1.3.1",
         "uvicorn==0.51.0",
@@ -1492,7 +1492,7 @@ def validate_azure_control_plane() -> None:
     for required_pin in (
         "azure-identity==1.25.3",
         "boto3==1.43.51",
-        "fastapi==0.139.1",
+        "fastapi==0.139.2",
         "httpx2==2.7.0",
         "PyJWT[crypto]==2.13.0",
         "starlette==1.3.1",
