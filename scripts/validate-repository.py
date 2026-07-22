@@ -1076,7 +1076,7 @@ def validate_idp_python_toolchain_contract(
     )
     require(
         lock.get("cliBuildTools")
-        == {"cfnLint": "1.53.0", "ruff": "0.15.21", "uv": "0.9.6"},
+        == {"cfnLint": "1.53.1", "ruff": "0.15.22", "uv": "0.9.6"},
         "Pinned IDP publisher build-tool versions changed.",
     )
     for fragment in (
@@ -1482,8 +1482,8 @@ def validate_azure_control_plane() -> None:
     development_requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
     for required_pin in (
         "azure-identity==1.25.3",
-        "boto3==1.43.51",
-        "fastapi==0.139.1",
+        "boto3==1.43.52",
+        "fastapi==0.139.2",
         "PyJWT[crypto]==2.13.0",
         "starlette==1.3.1",
         "uvicorn==0.51.0",
@@ -1491,8 +1491,8 @@ def validate_azure_control_plane() -> None:
         require(required_pin in runtime_requirements, f"Reviewed Azure runtime pin is missing: {required_pin}")
     for required_pin in (
         "azure-identity==1.25.3",
-        "boto3==1.43.51",
-        "fastapi==0.139.1",
+        "boto3==1.43.52",
+        "fastapi==0.139.2",
         "httpx2==2.7.0",
         "PyJWT[crypto]==2.13.0",
         "starlette==1.3.1",
@@ -2105,7 +2105,10 @@ def main() -> None:
         "review_draft_pull_requests = $true",
         "review_on_push = $true",
         "contexts = @('validate', 'copilot-review')",
-        "azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
+        "azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43",
+        "docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130",
+        "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f",
+        "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
     ):
         require(required_fragment in protection_script, f"GitHub protection lacks: {required_fragment}")
     require(
